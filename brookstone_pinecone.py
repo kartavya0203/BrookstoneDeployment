@@ -226,7 +226,7 @@ def process_incoming_message(from_phone, message_text, message_id):
     # Check if this is the first message and send welcome
     if state.get("is_first_message", True):
         state["is_first_message"] = False
-        welcome_text = "Hello! Welcome to Brookstone. How could I assist you today?"
+        welcome_text = "Hello! Welcome to Brookstone. How could I assist you today? 🏠✨"
         if state["language"] == "gujarati":
             welcome_text = translate_english_to_gujarati(welcome_text)
         send_whatsapp_text(from_phone, welcome_text)
@@ -246,7 +246,7 @@ def process_incoming_message(from_phone, message_text, message_id):
             state["waiting_for"] = None
             state["last_follow_up"] = None  # Clear previous follow-up
             send_whatsapp_location(from_phone)
-            confirmation_text = "📍 Here's our location! We're open from 10:30 AM to 7:00 PM. Looking forward to see you! 😊"
+            confirmation_text = "📍 Here's our location! We're open from 10:30 AM to 7:00 PM. Looking forward to see you! 🏠✨"
             if state["language"] == "gujarati":
                 confirmation_text = translate_english_to_gujarati(confirmation_text)
             send_whatsapp_text(from_phone, confirmation_text)
@@ -254,7 +254,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         elif any(word in message_lower for word in ["no", "nope", "not now", "later", "નહીં", "ના"]):
             state["waiting_for"] = None
             state["last_follow_up"] = None  # Clear previous follow-up
-            decline_text = "No problem! Feel free to ask if you need anything else. You can contact our agents at 8238477697 or 9974812701 anytime! 😊"
+            decline_text = "No problem! Feel free to ask if you need anything else. You can contact our agents at 8238477697 or 9974812701 anytime! ��😊"
             if state["language"] == "gujarati":
                 decline_text = translate_english_to_gujarati(decline_text)
             send_whatsapp_text(from_phone, decline_text)
@@ -266,7 +266,7 @@ def process_incoming_message(from_phone, message_text, message_id):
             state["waiting_for"] = None
             state["last_follow_up"] = None  # Clear previous follow-up
             send_whatsapp_document(from_phone)
-            brochure_text = "📄 Here's your Brookstone brochure! It has all the details about our luxury 3&4BHK flats. Any questions after going through it? 😊"
+            brochure_text = "📄 Here's your Brookstone brochure! It has all the details about our luxury 3&4BHK flats. Any questions after going through it? ✨😊"
             if state["language"] == "gujarati":
                 brochure_text = translate_english_to_gujarati(brochure_text)
             send_whatsapp_text(from_phone, brochure_text)
@@ -274,7 +274,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         elif any(word in message_lower for word in ["no", "not now", "later", "નહીં", "ના"]):
             state["waiting_for"] = None
             state["last_follow_up"] = None  # Clear previous follow-up
-            later_text = "Sure! Let me know if you'd like the brochure later or have any other questions about Brookstone. 😊"
+            later_text = "Sure! Let me know if you'd like the brochure later or have any other questions about Brookstone. 🏠�"
             if state["language"] == "gujarati":
                 later_text = translate_english_to_gujarati(later_text)
             send_whatsapp_text(from_phone, later_text)
@@ -286,7 +286,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         if any(word in message_lower for word in ["layout", "details", "size", "area", "plan", "floor", "design", "લેઆઉટ", "વિગત"]):
             state["waiting_for"] = "brochure_confirmation"
             state["last_follow_up"] = None  # Clear previous follow-up
-            clarify_text = "Great! Would you like me to send you our detailed brochure with all floor plans and specifications?"
+            clarify_text = "Great! Would you like me to send you our detailed brochure with all floor plans and specifications? 📄✨"
             if state["language"] == "gujarati":
                 clarify_text = translate_english_to_gujarati(clarify_text)
             send_whatsapp_text(from_phone, clarify_text)
@@ -295,7 +295,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         elif any(word in message_lower for word in ["visit", "site", "see", "tour", "book", "appointment", "schedule", "મુલાકાત", "સાઇટ"]):
             state["waiting_for"] = None
             state["last_follow_up"] = None  # Clear previous follow-up
-            visit_text = "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit. He'll help you schedule a convenient time."
+            visit_text = "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit. He'll help you schedule a convenient time. 📞✨"
             if state["language"] == "gujarati":
                 visit_text = translate_english_to_gujarati(visit_text)
             send_whatsapp_text(from_phone, visit_text)
@@ -303,7 +303,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         else:
             # If still unclear, ask again
             state["waiting_for"] = None
-            unclear_text = "I want to help you properly! Are you interested in seeing the layout details and brochure, or would you like to schedule a site visit? 😊"
+            unclear_text = "I want to help you properly! Are you interested in seeing the layout details and brochure, or would you like to schedule a site visit? 🏠✨"
             if state["language"] == "gujarati":
                 unclear_text = translate_english_to_gujarati(unclear_text)
             send_whatsapp_text(from_phone, unclear_text)
@@ -347,31 +347,43 @@ def process_incoming_message(from_phone, message_text, message_id):
             language_instruction = "IMPORTANT: User is asking in Gujarati. Respond in ENGLISH first, then it will be translated to Gujarati automatically."
         
         system_prompt = f"""
-You are a friendly real estate assistant for Brookstone project. Be conversational and natural.
+You are a friendly real estate assistant for Brookstone project. Be conversational, natural, and convincing.
 
 {language_instruction}
 
 CORE INSTRUCTIONS:
 - Be VERY CONCISE - give brief, direct answers (2-3 sentences max)
 - Answer using context below when available
-- Use 1 emoji maximum
+- Use 2-3 relevant emojis to make responses engaging
 - Keep responses WhatsApp-friendly
 - Do NOT invent details
 - Remember conversation flow and previous follow-ups
+- ALWAYS try to convince user in a friendly way
 
 MEMORY CONTEXT: {follow_up_memory}
 
+MANDATORY FLAT MENTIONS:
+- ALWAYS say "Brookstone offers luxurious 3&4BHK flats" (mention both types)
+- Even if user asks only about 3BHK or 4BHK, mention both options
+- This showcases our complete offering
+
 SPECIAL HANDLING:
 
-1. TIMINGS: "Our site office is open from *10:30 AM to 7:00 PM* every day. Would you like me to send you the location?"
+1. TIMINGS: "Our site office is open from *10:30 AM to 7:00 PM* every day. Would you like me to send you the location? 📍"
 
-2. SITE VISIT BOOKING: "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit."
+2. SITE VISIT BOOKING: "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit. 📞✨"
 
-3. GENERAL QUERIES: "You can contact our agents at 8238477697 or 9974812701 for any queries."
+3. GENERAL QUERIES: "You can contact our agents at 8238477697 or 9974812701 for any queries. 📱😊"
 
-4. PRICING: Check context first. If no pricing info: "For latest pricing details, please contact our agents at 8238477697 or 9974812701."
+4. PRICING: Check context first. If no pricing info: "For latest pricing details, please contact our agents at 8238477697 or 9974812701. 💰📞"
 
-5. LOCATION REQUEST: "Would you like me to send you our location?"
+5. LOCATION REQUEST: "Would you like me to send you our location? 📍🏠"
+
+CONVINCING STRATEGY:
+- Use positive, enthusiastic language
+- Highlight luxury and quality aspects
+- Create urgency subtly ("perfect time to visit", "great opportunity")
+- Use emojis that convey excitement: 🏠✨🌟💎🎉😊🔥💫
 
 FOLLOW-UP STRATEGY:
 - If user is responding to a previous follow-up question, acknowledge it and provide relevant information
@@ -381,7 +393,7 @@ FOLLOW-UP STRATEGY:
 
 RESPONSE PATTERN:
 1. If responding to previous follow-up, acknowledge and answer appropriately
-2. Give brief answer from context
+2. Give brief answer from context (always mention 3&4BHK when relevant)
 3. Ask ONE clear follow-up question to keep conversation flowing
 
 USER CONTEXT: {user_context}
@@ -390,6 +402,11 @@ CONVERSATION FLOW:
 - If user is answering my previous question, provide relevant info based on their response
 - Then naturally continue with another relevant question
 - Keep the conversation engaging and helpful
+- Always sound excited about Brookstone!
+
+Example Responses:
+- "Absolutely! Brookstone offers luxurious 3&4BHK flats 🏠✨ Would you like to know about the premium amenities? 🌟"
+- "Great choice! Our 4BHK units are part of Brookstone's luxurious 3&4BHK collection 💎 Interested in the spacious layouts? 📐"
 
 ---
 Available Knowledge Context:
@@ -397,7 +414,7 @@ Available Knowledge Context:
 
 User Question: {search_query}
 
-Provide a brief answer and ask ONE relevant follow-up question.
+Provide a brief, convincing answer with good emojis and ask ONE relevant follow-up question.
 Assistant:
         """.strip()
 
