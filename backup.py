@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from langchain_pinecone import PineconeVectorStore
 from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_openai import ChatOpenAI
+import json
+from datetime import datetime, timedelta
 
 load_dotenv()
 
@@ -22,6 +24,106 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "brookstone_verify_token_2024")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 BROCHURE_URL = os.getenv("BROCHURE_URL", "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/BROOKSTONE.pdf")
+
+# Media state file - stores last uploaded media_id and timestamp
+MEDIA_STATE_FILE = os.path.join(os.path.dirname(__file__), "media_state.json")
+MEDIA_ID = None
+MEDIA_EXPIRY_DAYS = 29  # refresh media every 29 days
+
+
+def load_media_state():
+    """Load media state (media_id and uploaded_at) from file."""
+    try:
+        if os.path.exists(MEDIA_STATE_FILE):
+            with open(MEDIA_STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        logging.error(f"❌ Error loading media state: {e}")
+    return {}
+
+
+def save_media_state(state: dict):
+    try:
+        with open(MEDIA_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception as e:
+        logging.error(f"❌ Error saving media state: {e}")
+
+
+def _find_brochure_file():
+    # common locations
+    candidates = [
+        os.path.join(os.path.dirname(__file__), "static", "brochure", "BROOKSTONE.pdf"),
+        os.path.join(os.path.dirname(__file__), "static", "BROCHURE.pdf"),
+        os.path.join(os.path.dirname(__file__), "BROOKSTONE.pdf"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def upload_brochure_media():
+    """Upload brochure PDF to WhatsApp Cloud and store media id."""
+    global MEDIA_ID
+    file_path = _find_brochure_file()
+    if not file_path:
+        logging.error("❌ Brochure file not found in static folders. Skipping media upload.")
+        return None
+
+    url = f"https://graph.facebook.com/v23.0/{WHATSAPP_PHONE_NUMBER_ID}/media"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    data = {"messaging_product": "whatsapp"}
+    try:
+        with open(file_path, "rb") as fh:
+            files = {"file": (os.path.basename(file_path), fh, "application/pdf")}
+            resp = requests.post(url, headers=headers, data=data, files=files, timeout=60)
+        if resp.status_code == 200:
+            j = resp.json()
+            new_media_id = j.get("id")
+            if new_media_id:
+                MEDIA_ID = new_media_id
+                state = {"media_id": MEDIA_ID, "uploaded_at": datetime.utcnow().isoformat()}
+                save_media_state(state)
+                logging.info(f"✅ Uploaded brochure media, id={MEDIA_ID}")
+                return MEDIA_ID
+            else:
+                logging.error(f"❌ Upload succeeded but no media id returned: {resp.text}")
+        else:
+            logging.error(f"❌ Failed to upload media: {resp.status_code} - {resp.text}")
+    except Exception as e:
+        logging.error(f"❌ Exception uploading media: {e}")
+    return None
+
+
+def ensure_media_up_to_date():
+    """Ensure we have a media_id and it's not expired (older than MEDIA_EXPIRY_DAYS)."""
+    global MEDIA_ID
+    state = load_media_state()
+    media_id = state.get("media_id")
+    uploaded_at = state.get("uploaded_at")
+    need_upload = True
+    if media_id and uploaded_at:
+        try:
+            uploaded_dt = datetime.fromisoformat(uploaded_at)
+            if datetime.utcnow() - uploaded_dt < timedelta(days=MEDIA_EXPIRY_DAYS):
+                MEDIA_ID = media_id
+                need_upload = False
+                logging.info(f"ℹ️ Using existing media_id (uploaded {uploaded_at})")
+        except Exception:
+            need_upload = True
+
+    if need_upload:
+        logging.info("ℹ️ Uploading brochure media to WhatsApp Cloud (initial/refresh)")
+        upload_brochure_media()
+
+
+# Initialize media state at startup (without scheduler)
+try:
+    ensure_media_up_to_date()
+    logging.info(f"� Media management initialized. Use refresh_media.py for 29-day renewals.")
+except Exception as e:
+    logging.error(f"❌ Error initializing media: {e}")
 
 if not OPENAI_API_KEY or not PINECONE_API_KEY:
     logging.error("❌ Missing API keys!")
@@ -72,11 +174,11 @@ def translate_english_to_gujarati(text):
     """Translate English text to Gujarati"""
     try:
         translation_prompt = f"""
-Translate the following English text to Gujarati. Keep the same tone and style. Provide only the Gujarati translation, nothing else.
+Translate the following English text to Gujarati. Keep the same tone, style, and LENGTH - make it brief and concise like the original. Provide only the Gujarati translation, nothing else.
 
 English text: {text}
 
-Gujarati translation:
+Gujarati translation (keep it brief and concise):
         """
         response = translator_llm.invoke(translation_prompt)
         return response.content.strip()
@@ -187,14 +289,26 @@ def send_whatsapp_location(to_phone):
         logging.error(f"❌ Error sending location: {e}")
 
 def send_whatsapp_document(to_phone, caption="Here is your Brookstone Brochure 📄"):
+    # If we have a valid MEDIA_ID, send the document by media id, otherwise fallback to link
     url = f"https://graph.facebook.com/v23.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone,
-        "type": "document",
-        "document": {"link": BROCHURE_URL, "caption": caption, "filename": "Brookstone_Brochure.pdf"}
-    }
+
+    if MEDIA_ID:
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_phone,
+            "type": "document",
+            "document": {"id": MEDIA_ID, "caption": caption, "filename": "Brookstone_Brochure.pdf"}
+        }
+    else:
+        # fallback to sending by link if media id is not available
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_phone,
+            "type": "document",
+            "document": {"link": BROCHURE_URL, "caption": caption, "filename": "Brookstone_Brochure.pdf"}
+        }
+
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=15)
         if response.status_code == 200:
@@ -226,7 +340,7 @@ def process_incoming_message(from_phone, message_text, message_id):
     # Check if this is the first message and send welcome
     if state.get("is_first_message", True):
         state["is_first_message"] = False
-        welcome_text = "Hello! Welcome to Brookstone. How could I assist you today?"
+        welcome_text = "Hello! Welcome to Brookstone. How could I assist you today? 🏠✨"
         if state["language"] == "gujarati":
             welcome_text = translate_english_to_gujarati(welcome_text)
         send_whatsapp_text(from_phone, welcome_text)
@@ -246,7 +360,7 @@ def process_incoming_message(from_phone, message_text, message_id):
             state["waiting_for"] = None
             state["last_follow_up"] = None  # Clear previous follow-up
             send_whatsapp_location(from_phone)
-            confirmation_text = "📍 Here's our location! We're open from 10:30 AM to 7:00 PM. Looking forward to see you! 😊"
+            confirmation_text = "📍 Here's our location! We're open from 10:30 AM to 7:00 PM. Looking forward to see you! 🏠✨"
             if state["language"] == "gujarati":
                 confirmation_text = translate_english_to_gujarati(confirmation_text)
             send_whatsapp_text(from_phone, confirmation_text)
@@ -254,7 +368,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         elif any(word in message_lower for word in ["no", "nope", "not now", "later", "નહીં", "ના"]):
             state["waiting_for"] = None
             state["last_follow_up"] = None  # Clear previous follow-up
-            decline_text = "No problem! Feel free to ask if you need anything else. You can contact our agents at 8238477697 or 9974812701 anytime! 😊"
+            decline_text = "No problem! Feel free to ask if you need anything else. You can contact our agents at 8238477697 or 9974812701 anytime! ��😊"
             if state["language"] == "gujarati":
                 decline_text = translate_english_to_gujarati(decline_text)
             send_whatsapp_text(from_phone, decline_text)
@@ -266,7 +380,7 @@ def process_incoming_message(from_phone, message_text, message_id):
             state["waiting_for"] = None
             state["last_follow_up"] = None  # Clear previous follow-up
             send_whatsapp_document(from_phone)
-            brochure_text = "📄 Here's your Brookstone brochure! It has all the details about our luxury 3&4BHK flats. Any questions after going through it? 😊"
+            brochure_text = "📄 Here's your Brookstone brochure! It has all the details about our luxury 3&4BHK flats. Any questions after going through it? ✨😊"
             if state["language"] == "gujarati":
                 brochure_text = translate_english_to_gujarati(brochure_text)
             send_whatsapp_text(from_phone, brochure_text)
@@ -274,7 +388,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         elif any(word in message_lower for word in ["no", "not now", "later", "નહીં", "ના"]):
             state["waiting_for"] = None
             state["last_follow_up"] = None  # Clear previous follow-up
-            later_text = "Sure! Let me know if you'd like the brochure later or have any other questions about Brookstone. 😊"
+            later_text = "Sure! Let me know if you'd like the brochure later or have any other questions about Brookstone. 🏠�"
             if state["language"] == "gujarati":
                 later_text = translate_english_to_gujarati(later_text)
             send_whatsapp_text(from_phone, later_text)
@@ -286,7 +400,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         if any(word in message_lower for word in ["layout", "details", "size", "area", "plan", "floor", "design", "લેઆઉટ", "વિગત"]):
             state["waiting_for"] = "brochure_confirmation"
             state["last_follow_up"] = None  # Clear previous follow-up
-            clarify_text = "Great! Would you like me to send you our detailed brochure with all floor plans and specifications?"
+            clarify_text = "Great! Would you like me to send you our detailed brochure with all floor plans and specifications? 📄✨"
             if state["language"] == "gujarati":
                 clarify_text = translate_english_to_gujarati(clarify_text)
             send_whatsapp_text(from_phone, clarify_text)
@@ -295,7 +409,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         elif any(word in message_lower for word in ["visit", "site", "see", "tour", "book", "appointment", "schedule", "મુલાકાત", "સાઇટ"]):
             state["waiting_for"] = None
             state["last_follow_up"] = None  # Clear previous follow-up
-            visit_text = "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit. He'll help you schedule a convenient time."
+            visit_text = "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit. He'll help you schedule a convenient time. 📞✨"
             if state["language"] == "gujarati":
                 visit_text = translate_english_to_gujarati(visit_text)
             send_whatsapp_text(from_phone, visit_text)
@@ -303,7 +417,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         else:
             # If still unclear, ask again
             state["waiting_for"] = None
-            unclear_text = "I want to help you properly! Are you interested in seeing the layout details and brochure, or would you like to schedule a site visit? 😊"
+            unclear_text = "I want to help you properly! Are you interested in seeing the layout details and brochure, or would you like to schedule a site visit? 🏠✨"
             if state["language"] == "gujarati":
                 unclear_text = translate_english_to_gujarati(unclear_text)
             send_whatsapp_text(from_phone, unclear_text)
@@ -344,34 +458,46 @@ def process_incoming_message(from_phone, message_text, message_id):
         # Determine language for system prompt
         language_instruction = ""
         if state["language"] == "gujarati":
-            language_instruction = "IMPORTANT: User is asking in Gujarati. Respond in ENGLISH first, then it will be translated to Gujarati automatically."
+            language_instruction = "IMPORTANT: User is asking in Gujarati. Respond in ENGLISH first (keep it VERY SHORT), then it will be translated to Gujarati automatically. The Gujarati translation should also be brief and concise."
         
         system_prompt = f"""
-You are a friendly real estate assistant for Brookstone project. Be conversational and natural.
+You are a friendly real estate assistant for Brookstone project. Be conversational, natural, and convincing.
 
 {language_instruction}
 
 CORE INSTRUCTIONS:
 - Be VERY CONCISE - give brief, direct answers (2-3 sentences max)
 - Answer using context below when available
-- Use 1 emoji maximum
+- Use 2-3 relevant emojis to make responses engaging
 - Keep responses WhatsApp-friendly
 - Do NOT invent details
 - Remember conversation flow and previous follow-ups
+- ALWAYS try to convince user in a friendly way
 
 MEMORY CONTEXT: {follow_up_memory}
 
+MANDATORY FLAT MENTIONS:
+- ALWAYS say "Brookstone offers luxurious 3&4BHK flats" (mention both types)
+- Even if user asks only about 3BHK or 4BHK, mention both options
+- This showcases our complete offering
+
 SPECIAL HANDLING:
 
-1. TIMINGS: "Our site office is open from *10:30 AM to 7:00 PM* every day. Would you like me to send you the location?"
+1. TIMINGS: "Our site office is open from *10:30 AM to 7:00 PM* every day. Would you like me to send you the location? 📍"
 
-2. SITE VISIT BOOKING: "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit."
+2. SITE VISIT BOOKING: "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit. 📞✨"
 
-3. GENERAL QUERIES: "You can contact our agents at 8238477697 or 9974812701 for any queries."
+3. GENERAL QUERIES: "You can contact our agents at 8238477697 or 9974812701 for any queries. 📱😊"
 
-4. PRICING: Check context first. If no pricing info: "For latest pricing details, please contact our agents at 8238477697 or 9974812701."
+4. PRICING: Check context first. If no pricing info: "For latest pricing details, please contact our agents at 8238477697 or 9974812701. 💰📞"
 
-5. LOCATION REQUEST: "Would you like me to send you our location?"
+5. LOCATION REQUEST: "Would you like me to send you our location? 📍🏠"
+
+CONVINCING STRATEGY:
+- Use positive, enthusiastic language
+- Highlight luxury and quality aspects
+- Create urgency subtly ("perfect time to visit", "great opportunity")
+- Use emojis that convey excitement: 🏠✨🌟💎🎉😊🔥💫
 
 FOLLOW-UP STRATEGY:
 - If user is responding to a previous follow-up question, acknowledge it and provide relevant information
@@ -381,7 +507,7 @@ FOLLOW-UP STRATEGY:
 
 RESPONSE PATTERN:
 1. If responding to previous follow-up, acknowledge and answer appropriately
-2. Give brief answer from context
+2. Give brief answer from context (always mention 3&4BHK when relevant)
 3. Ask ONE clear follow-up question to keep conversation flowing
 
 USER CONTEXT: {user_context}
@@ -390,6 +516,11 @@ CONVERSATION FLOW:
 - If user is answering my previous question, provide relevant info based on their response
 - Then naturally continue with another relevant question
 - Keep the conversation engaging and helpful
+- Always sound excited about Brookstone!
+
+Example Responses:
+- "Absolutely! Brookstone offers luxurious 3&4BHK flats 🏠✨ Would you like to know about the premium amenities? 🌟"
+- "Great choice! Our 4BHK units are part of Brookstone's luxurious 3&4BHK collection 💎 Interested in the spacious layouts? 📐"
 
 ---
 Available Knowledge Context:
@@ -397,7 +528,7 @@ Available Knowledge Context:
 
 User Question: {search_query}
 
-Provide a brief answer and ask ONE relevant follow-up question.
+Provide a brief, convincing answer with good emojis and ask ONE relevant follow-up question.
 Assistant:
         """.strip()
 
