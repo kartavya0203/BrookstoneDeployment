@@ -6,6 +6,7 @@ import requests
 from dotenv import load_dotenv
 from langchain_pinecone import PineconeVectorStore
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_community.embeddings import OpenAIEmbeddings
 import json
 from datetime import datetime, timedelta
 import google.generativeai as genai
@@ -22,6 +23,7 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "brookstone_verify_token_2024")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Keep for Pinecone embeddings
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 BROCHURE_URL = os.getenv("BROCHURE_URL", "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/BROOKSTONE.pdf")
 
@@ -125,39 +127,48 @@ try:
 except Exception as e:
     logging.error(f"❌ Error initializing media: {e}")
 
-if not GEMINI_API_KEY or not PINECONE_API_KEY:
-    logging.error("❌ Missing API keys!")
+if not GEMINI_API_KEY or not PINECONE_API_KEY or not OPENAI_API_KEY:
+    logging.error("❌ Missing API keys! Need GEMINI_API_KEY, PINECONE_API_KEY, and OPENAI_API_KEY")
 
-# Initialize Gemini for all AI tasks including embeddings and chat
+# Initialize Gemini for chat and translations, OpenAI for Pinecone embeddings
 gemini_model = None
-gemini_embeddings = None
 gemini_chat = None
+openai_embeddings = None
 
 if not GEMINI_API_KEY:
-    logging.error("❌ Missing Gemini API key! All AI features will not work.")
+    logging.error("❌ Missing Gemini API key! Chat and translation features will not work.")
 else:
     try:
         # Configure Gemini
         genai.configure(api_key=GEMINI_API_KEY)
         gemini_model = genai.GenerativeModel('gemini-2.5-flash')
         
-        # Initialize Gemini embeddings and chat for LangChain
-        gemini_embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/text-embedding-004",
-            google_api_key=GEMINI_API_KEY
-        )
+        # Initialize Gemini chat for LangChain
         gemini_chat = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
             google_api_key=GEMINI_API_KEY,
             temperature=0
         )
         
-        logging.info("✅ Gemini API configured and all models initialized successfully")
+        logging.info("✅ Gemini API configured for chat and translations")
     except Exception as e:
         logging.error(f"❌ Error initializing Gemini: {e}")
         gemini_model = None
-        gemini_embeddings = None
         gemini_chat = None
+
+# Initialize OpenAI embeddings for Pinecone (to work with existing data)
+if not OPENAI_API_KEY:
+    logging.error("❌ Missing OpenAI API key! Pinecone search will not work.")
+else:
+    try:
+        openai_embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-large",
+            openai_api_key=OPENAI_API_KEY
+        )
+        logging.info("✅ OpenAI embeddings configured for Pinecone search")
+    except Exception as e:
+        logging.error(f"❌ Error initializing OpenAI embeddings: {e}")
+        openai_embeddings = None
 
 # ================================================
 # PINECONE SETUP
@@ -165,16 +176,16 @@ else:
 INDEX_NAME = "brookstone-faq-json"
 
 def load_vectorstore():
-    if not gemini_embeddings:
-        logging.error("❌ Gemini embeddings not available")
+    if not openai_embeddings:
+        logging.error("❌ OpenAI embeddings not available for Pinecone")
         return None
-    return PineconeVectorStore(index_name=INDEX_NAME, embedding=gemini_embeddings)
+    return PineconeVectorStore(index_name=INDEX_NAME, embedding=openai_embeddings)
 
 try:
     vectorstore = load_vectorstore()
     if vectorstore:
         retriever = vectorstore.as_retriever(search_kwargs={"k": 100})
-        logging.info("✅ Pinecone vectorstore with Gemini embeddings loaded successfully")
+        logging.info("✅ Pinecone vectorstore with OpenAI embeddings loaded successfully")
     else:
         retriever = None
         logging.error("❌ Failed to load vectorstore")
@@ -865,8 +876,9 @@ def health():
     return jsonify({
         "status": "healthy",
         "whatsapp_configured": bool(WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID),
-        "gemini_configured": bool(GEMINI_API_KEY and gemini_model and gemini_embeddings and gemini_chat),
-        "pinecone_configured": bool(PINECONE_API_KEY)
+        "gemini_configured": bool(GEMINI_API_KEY and gemini_model and gemini_chat),
+        "pinecone_configured": bool(PINECONE_API_KEY and openai_embeddings),
+        "hybrid_mode": "Gemini for chat, OpenAI for search"
     }), 200
 
 @app.route("/", methods=["GET"])

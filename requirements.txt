@@ -1,5 +1,5 @@
 # ================================================
-# BROOKSTONE WHATSAPP BOT - REQUIREMENTS
+# BROOKSTONE WHATSAPP BOT - HYBRID AI REQUIREMENTS
 # ================================================
 
 # Core Web Framework
@@ -12,21 +12,26 @@ requests>=2.31.0
 python-dotenv>=1.0.0
 
 # ================================================
-# AI & VECTOR DATABASE STACK
+# HYBRID AI STACK (Gemini + OpenAI)
 # ================================================
 
 # Vector Database Integration
 langchain-pinecone>=0.1.0
 
-# Google Gemini AI Services
+# Google Gemini AI Services (for chat and translations)
 langchain-google-genai>=1.0.0
 google-generativeai>=0.8.0
 
+# OpenAI Services (for existing Pinecone embeddings)
+langchain-openai>=0.1.0
+openai>=1.0.0
+
 # LangChain Core
 langchain-core>=0.2.0
+langchain-community>=0.2.0
 
 # ================================================
-# PRODUCTION DEPLOYMENT (Optional)
+# PRODUCTION DEPLOYMENT
 # ================================================
 
 # WSGI HTTP Server
