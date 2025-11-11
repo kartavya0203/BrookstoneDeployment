@@ -29,12 +29,10 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 # Pinecone Vector Store
 from langchain_community.vectorstores import Pinecone as LangchainPinecone
 
-# LangChain Memory Components
-from langchain.memory import (
-    ConversationSummaryBufferMemory,
-    ConversationEntityMemory,
-)
-from langchain.chains import ConversationChain
+# LangChain Core for memory and chains
+from langchain_core.memory import BaseMemory
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.messages import BaseMessage
 from langchain_community.chat_message_histories import ChatMessageHistory
 
 # Load environment variables
@@ -220,24 +218,16 @@ llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 translator_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
 # ================================================
-# MEMORY SYSTEM
+# MEMORY SYSTEM - Simple Custom Implementation
 # ================================================
-CONVERSATION_MEMORIES: Dict[str, ConversationSummaryBufferMemory] = {}
+CONVERSATION_HISTORIES: Dict[str, List[Dict[str, str]]] = {}
 USER_PROFILES: Dict[str, UserProfile] = {}
 
 
-def get_or_create_memory(from_phone: str) -> tuple[ConversationSummaryBufferMemory, UserProfile]:
-    """Get or create a LangChain memory instance for a user."""
-    if from_phone not in CONVERSATION_MEMORIES:
-        # Create summary buffer memory
-        CONVERSATION_MEMORIES[from_phone] = ConversationSummaryBufferMemory(
-            llm=llm,
-            max_token_limit=800,
-            return_messages=True,
-            memory_key="chat_history",
-            human_prefix="User",
-            ai_prefix="Assistant"
-        )
+def get_or_create_memory(from_phone: str) -> tuple[List[Dict[str, str]], UserProfile]:
+    """Get or create a simple conversation history for a user."""
+    if from_phone not in CONVERSATION_HISTORIES:
+        CONVERSATION_HISTORIES[from_phone] = []
         
         # Initialize user profile
         USER_PROFILES[from_phone] = {
@@ -251,7 +241,34 @@ def get_or_create_memory(from_phone: str) -> tuple[ConversationSummaryBufferMemo
             "first_interaction": True
         }
     
-    return CONVERSATION_MEMORIES[from_phone], USER_PROFILES[from_phone]
+    return CONVERSATION_HISTORIES[from_phone], USER_PROFILES[from_phone]
+
+
+def add_to_conversation_history(from_phone: str, user_message: str, bot_response: str):
+    """Add a conversation turn to the history."""
+    if from_phone in CONVERSATION_HISTORIES:
+        CONVERSATION_HISTORIES[from_phone].append({
+            "human": user_message,
+            "assistant": bot_response,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
+        
+        # Keep only last 10 conversations to avoid memory bloat
+        if len(CONVERSATION_HISTORIES[from_phone]) > 10:
+            CONVERSATION_HISTORIES[from_phone] = CONVERSATION_HISTORIES[from_phone][-10:]
+
+
+def format_conversation_history(history: List[Dict[str, str]]) -> str:
+    """Format conversation history for prompt."""
+    if not history:
+        return "No previous conversation."
+    
+    formatted = []
+    for turn in history[-5:]:  # Only use last 5 turns
+        formatted.append(f"Human: {turn['human']}")
+        formatted.append(f"Assistant: {turn['assistant']}")
+    
+    return "\n".join(formatted)
 
 
 def analyze_user_intent(message_text: str, user_profile: UserProfile) -> List[str]:
@@ -554,8 +571,8 @@ def mark_message_as_read(message_id: str) -> None:
 # ================================================
 def process_incoming_message(from_phone: str, message_text: str, message_id: str) -> None:
     """Process incoming message with memory and context."""
-    # Get or create memory and user profile
-    memory, user_profile = get_or_create_memory(from_phone)
+    # Get or create conversation history and user profile
+    conversation_history, user_profile = get_or_create_memory(from_phone)
     
     # Detect language
     gujarati_chars = any("\u0A80" <= c <= "\u0AFF" for c in message_text)
@@ -570,7 +587,8 @@ def process_incoming_message(from_phone: str, message_text: str, message_id: str
             welcome_text = translate_english_to_gujarati(welcome_text)
         
         send_whatsapp_text(from_phone, welcome_text)
-        memory.save_context({"input": message_text}, {"output": welcome_text})
+        # Add welcome to conversation history
+        add_to_conversation_history(from_phone, message_text, welcome_text)
         return
 
     # Analyze user intent
@@ -610,23 +628,27 @@ def process_incoming_message(from_phone: str, message_text: str, message_id: str
         # Build context variables
         context_vars = build_context_variables(user_profile, detected_intents, context)
         
-        # Create conversation chain
+        # Format conversation history
+        formatted_history = format_conversation_history(conversation_history)
+        
+        # Create dynamic prompt with conversation history
         prompt_template = create_dynamic_prompt_template()
-        conversation_chain = ConversationChain(
-            llm=llm,
-            prompt=prompt_template,
-            memory=memory,
-            verbose=False
+        prompt = prompt_template.format(
+            chat_history=formatted_history,
+            input=message_text,
+            **context_vars
         )
 
-        # Get response
-        response = conversation_chain.predict(input=message_text, **context_vars)
-        logger.info(f"🧠 LLM Response: {response}")
+        # Get response from LLM directly
+        response = llm.invoke(prompt)
+        response_text = response.content if hasattr(response, 'content') else str(response)
+        
+        logger.info(f"🧠 LLM Response: {response_text}")
 
         # Translate if needed
-        final_response = response
+        final_response = response_text
         if user_profile["language"] == "gujarati":
-            final_response = translate_english_to_gujarati(response)
+            final_response = translate_english_to_gujarati(response_text)
             logger.info(f"🔄 Translated response: {final_response}")
 
         # Clean response
@@ -639,14 +661,17 @@ def process_incoming_message(from_phone: str, message_text: str, message_id: str
         
         # Send main response
         send_whatsapp_text(from_phone, clean_response)
+        
+        # Add to conversation history
+        add_to_conversation_history(from_phone, message_text, clean_response)
 
         # Handle automatic actions
-        if "SEND_LOCATION_NOW" in response or "location_request" in detected_intents:
+        if "SEND_LOCATION_NOW" in response_text or "location_request" in detected_intents:
             send_whatsapp_location(from_phone)
             user_profile["location_sent"] = True
             logger.info(f"📍 Location sent to {from_phone}")
             
-        if "SEND_BROCHURE_NOW" in response or "brochure_request" in detected_intents:
+        if "SEND_BROCHURE_NOW" in response_text or "brochure_request" in detected_intents:
             send_whatsapp_document(from_phone)
             user_profile["brochure_sent"] = True
             logger.info(f"📄 Brochure sent to {from_phone}")
