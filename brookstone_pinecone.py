@@ -593,10 +593,24 @@ def process_incoming_message(from_phone, message_text, message_id):
         send_whatsapp_location(from_phone)
         return
 
-    # 📄 PRIORITY: Check for direct brochure requests
+    # 📄 PRIORITY: Check for direct brochure requests (Enhanced Gujarati Support)
     brochure_keywords = ["brochure", "pdf", "document", "file", "download", "send", "details", "ब्रोशर", "બ્રોશર"]
+    gujarati_action_words = ["મોકલો", "આપો", "મોકલાવો", "મોકલ", "આપ", "જોઈએ", "પાઠવો", "મેળવવા", "લેવા"]
+    
+    # Check for Gujarati brochure requests specifically
+    if "બ્રોશર" in message_text:
+        # If user mentions "બ્રોશર" in any context, send the brochure immediately
+        logging.info(f"📄 Gujarati brochure request detected from {from_phone} - 'બ્રોશર' found")
+        send_whatsapp_document(from_phone)
+        brochure_sent_text = "📄 Here's your Brookstone brochure with complete details! ✨ Any questions after reviewing it? 🏠😊"
+        if state["language"] == "gujarati":
+            brochure_sent_text = translate_english_to_gujarati(brochure_sent_text)
+        send_whatsapp_text(from_phone, brochure_sent_text)
+        return
+    
+    # Check for English brochure requests
     if any(keyword in message_text.lower() for keyword in brochure_keywords):
-        if any(word in message_text.lower() for word in ["send", "share", "give", "want", "need", "show", "મોકલો", "આપો"]):
+        if any(word in message_text.lower() for word in ["send", "share", "give", "want", "need", "show"] + gujarati_action_words):
             logging.info(f"📄 Direct brochure request detected from {from_phone}")
             send_whatsapp_document(from_phone)
             brochure_sent_text = "📄 Here's your Brookstone brochure with complete details! ✨ Any questions after reviewing it? 🏠😊"
