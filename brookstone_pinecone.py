@@ -262,6 +262,7 @@ def ensure_conversation_state(from_phone):
         CONV_STATE[from_phone] = {
             "chat_history": [], 
             "language": "english", 
+            "language_established": False,  # Track if user has established language preference
             "waiting_for": None,
             "last_context_topics": [],
             "user_interests": [],
@@ -289,6 +290,8 @@ def ensure_conversation_state(from_phone):
             CONV_STATE[from_phone]["conversation_summary"] = ""
         if "user_preferences" not in CONV_STATE[from_phone]:
             CONV_STATE[from_phone]["user_preferences"] = {}
+        if "language_established" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["language_established"] = False
 
 def update_conversation_memory_with_gemini(state, user_message, bot_response):
     """Use Gemini to analyze and update conversation memory"""
@@ -545,8 +548,34 @@ def mark_message_as_read(message_id):
 def process_incoming_message(from_phone, message_text, message_id):
     ensure_conversation_state(from_phone)
     state = CONV_STATE[from_phone]
-    guj = any("\u0A80" <= c <= "\u0AFF" for c in message_text)
-    state["language"] = "gujarati" if guj else "english"
+    
+    # Improved language detection - consider conversation history
+    current_msg_has_gujarati = any("\u0A80" <= c <= "\u0AFF" for c in message_text)
+    
+    # If current message has Gujarati, definitely set to Gujarati
+    if current_msg_has_gujarati:
+        state["language"] = "gujarati"
+        state["language_established"] = True
+    # If user hasn't established language preference yet, detect from current message
+    elif not state.get("language_established", False):
+        state["language"] = "gujarati" if current_msg_has_gujarati else "english"
+        # Check conversation history to see if user has used Gujarati before
+        for msg in state["chat_history"][-5:]:  # Check last 5 messages
+            if any("\u0A80" <= c <= "\u0AFF" for c in msg.get("content", "")):
+                state["language"] = "gujarati"
+                break
+        state["language_established"] = True
+    # If language is established and user has been using Gujarati, keep using Gujarati
+    # unless they explicitly write a long English message (>20 words) indicating switch
+    elif state.get("language") == "gujarati":
+        # Keep Gujarati unless it's a very long English message suggesting intentional switch
+        english_words = len(message_text.split())
+        if not current_msg_has_gujarati and english_words > 20:
+            state["language"] = "english"
+        # Otherwise keep Gujarati preference
+    
+    logging.info(f"🌐 Language detected: {state['language']} (established: {state.get('language_established', False)}) for message: {message_text[:30]}...")
+    
     state["chat_history"].append({"role": "user", "content": message_text})
 
     # Check if this is the first message and send welcome
