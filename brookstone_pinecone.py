@@ -5,15 +5,10 @@ from flask import Flask, request, jsonify
 import requests
 from dotenv import load_dotenv
 from langchain_pinecone import PineconeVectorStore
-from langchain_community.embeddings import OpenAIEmbeddings
-from langchain_openai import ChatOpenAI
-from langchain.memory import ConversationSummaryBufferMemory, ConversationEntityMemory
-from langchain.memory.chat_message_histories import ChatMessageHistory
-from langchain.schema import BaseMessage, HumanMessage, AIMessage
-from langchain.chains import ConversationChain
-from langchain.prompts import PromptTemplate
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 import json
 from datetime import datetime, timedelta
+import google.generativeai as genai
 
 load_dotenv()
 
@@ -26,7 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "brookstone_verify_token_2024")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 BROCHURE_URL = os.getenv("BROCHURE_URL", "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/BROOKSTONE.pdf")
 
@@ -130,8 +125,39 @@ try:
 except Exception as e:
     logging.error(f"❌ Error initializing media: {e}")
 
-if not OPENAI_API_KEY or not PINECONE_API_KEY:
+if not GEMINI_API_KEY or not PINECONE_API_KEY:
     logging.error("❌ Missing API keys!")
+
+# Initialize Gemini for all AI tasks including embeddings and chat
+gemini_model = None
+gemini_embeddings = None
+gemini_chat = None
+
+if not GEMINI_API_KEY:
+    logging.error("❌ Missing Gemini API key! All AI features will not work.")
+else:
+    try:
+        # Configure Gemini
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+        
+        # Initialize Gemini embeddings and chat for LangChain
+        gemini_embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/text-embedding-004",
+            google_api_key=GEMINI_API_KEY
+        )
+        gemini_chat = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=GEMINI_API_KEY,
+            temperature=0
+        )
+        
+        logging.info("✅ Gemini API configured and all models initialized successfully")
+    except Exception as e:
+        logging.error(f"❌ Error initializing Gemini: {e}")
+        gemini_model = None
+        gemini_embeddings = None
+        gemini_chat = None
 
 # ================================================
 # PINECONE SETUP
@@ -139,190 +165,38 @@ if not OPENAI_API_KEY or not PINECONE_API_KEY:
 INDEX_NAME = "brookstone-faq-json"
 
 def load_vectorstore():
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
-    return PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
+    if not gemini_embeddings:
+        logging.error("❌ Gemini embeddings not available")
+        return None
+    return PineconeVectorStore(index_name=INDEX_NAME, embedding=gemini_embeddings)
 
 try:
     vectorstore = load_vectorstore()
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 100})
-    logging.info("✅ Pinecone vectorstore loaded successfully")
+    if vectorstore:
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 100})
+        logging.info("✅ Pinecone vectorstore with Gemini embeddings loaded successfully")
+    else:
+        retriever = None
+        logging.error("❌ Failed to load vectorstore")
 except Exception as e:
     logging.error(f"❌ Error loading Pinecone: {e}")
     retriever = None
 
 # ================================================
-# LLM SETUP WITH LANGCHAIN MEMORY
+# LLM SETUP
 # ================================================
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-translator_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-
-# ================================================
-# LANGCHAIN MEMORY SYSTEM
-# ================================================
-CONVERSATION_MEMORIES = {}
-USER_PROFILES = {}
-
-def get_or_create_memory(from_phone):
-    """Get or create a LangChain memory instance for a user"""
-    if from_phone not in CONVERSATION_MEMORIES:
-        # Create a summary buffer memory that keeps recent messages and summarizes older ones
-        CONVERSATION_MEMORIES[from_phone] = ConversationSummaryBufferMemory(
-            llm=llm,
-            max_token_limit=800,  # Keep around 800 tokens of recent conversation
-            return_messages=True,
-            memory_key="chat_history",
-            human_prefix="User",
-            ai_prefix="Assistant"
-        )
-        
-        # Initialize user profile
-        USER_PROFILES[from_phone] = {
-            "language": "english",
-            "interests": set(),
-            "stage": "initial",  # initial, interested, serious, ready_to_visit
-            "last_intent": None,
-            "visit_scheduled": False,
-            "brochure_sent": False,
-            "location_sent": False,
-            "first_interaction": True
-        }
-    
-    return CONVERSATION_MEMORIES[from_phone], USER_PROFILES[from_phone]
-
-def analyze_user_intent(message_text, user_profile):
-    """Analyze user message to detect intents using semantic understanding"""
-    message_lower = message_text.lower()
-    
-    # Dynamic intent detection without hardcoding
-    intents = {
-        "location_request": any(word in message_lower for word in [
-            "location", "address", "where", "place", "map", "કયાં", "સરનામું", "લોકેશન", "એડ્રેસ", "સ્થળ"
-        ]),
-        "brochure_request": any(word in message_lower for word in [
-            "brochure", "details", "information", "catalog", "બ્રોશર", "વિગત", "માહિતી", "ડિટેલ્સ"
-        ]),
-        "pricing_inquiry": any(word in message_lower for word in [
-            "price", "cost", "budget", "rate", "amount", "કિંમત", "ભાવ", "દર", "રેટ"
-        ]),
-        "amenities_inquiry": any(word in message_lower for word in [
-            "amenities", "facilities", "features", "gym", "pool", "સુવિધા", "સુવિધાઓ", "જીમ", "પૂલ"
-        ]),
-        "visit_request": any(word in message_lower for word in [
-            "visit", "see", "tour", "show", "book", "appointment", "મુલાકાત", "જોવા", "દેખાડો", "બતાવો"
-        ]),
-        "positive_response": any(word in message_lower for word in [
-            "yes", "okay", "sure", "good", "fine", "right", "હા", "જોઈએ", "બરાબર", "સારું"
-        ]),
-        "unit_inquiry": any(word in message_lower for word in [
-            "3bhk", "4bhk", "bedroom", "bhk", "flat", "apartment", "બેડરૂમ", "ફ્લેટ"
-        ])
-    }
-    
-    # Update user profile with detected intents
-    detected_intents = [intent for intent, detected in intents.items() if detected]
-    for intent in detected_intents:
-        user_profile["interests"].add(intent)
-    
-    # Update user stage based on interaction patterns
-    interest_count = len(user_profile["interests"])
-    if "visit_request" in user_profile["interests"]:
-        user_profile["stage"] = "ready_to_visit"
-    elif interest_count >= 3:
-        user_profile["stage"] = "serious"
-    elif interest_count >= 1:
-        user_profile["stage"] = "interested"
-    
-    # Store last intent for context
-    if detected_intents:
-        user_profile["last_intent"] = detected_intents[0]
-    
-    return detected_intents
-
-def create_dynamic_prompt_template():
-    """Create a dynamic prompt template based on conversation context"""
-    template = """You are a friendly, professional real estate assistant for Brookstone - a luxury residential project in Ahmedabad.
-
-CONVERSATION CONTEXT:
-{chat_history}
-
-USER PROFILE INSIGHTS:
-- User Stage: {user_stage}
-- Interests: {user_interests}
-- Language: {language}
-- Last Intent: {last_intent}
-
-CORE PRINCIPLES:
-- Be conversational, warm, and professional
-- Keep responses concise (2-3 sentences max)
-- Always mention "Brookstone offers luxurious 3&4BHK flats" when discussing units
-- Use 2-3 relevant emojis per response
-- Ask ONE engaging follow-up question
-- Be helpful but not pushy
-
-INTENT-SPECIFIC ACTIONS:
-{intent_actions}
-
-STAGE-SPECIFIC APPROACH:
-{stage_approach}
-
-STANDARD INFO:
-- Office Hours: 10:30 AM to 7:00 PM daily
-- Site Visits: Mr. Nilesh at 7600612701
-- General Queries: 8238477697 or 9974812701
-
-RELEVANT KNOWLEDGE:
-{context}
-
-Current User Message: {input}
-
-Assistant Response (respond in English - will be auto-translated if needed):"""
-    
-    return PromptTemplate(
-        input_variables=["chat_history", "user_stage", "user_interests", "language", 
-                        "last_intent", "intent_actions", "stage_approach", "context", "input"],
-        template=template
-    )
-
-def build_context_variables(user_profile, detected_intents, context):
-    """Build dynamic context variables for the prompt"""
-    
-    # Build intent-specific actions
-    intent_actions = []
-    if "location_request" in detected_intents:
-        intent_actions.append("🎯 USER WANTS LOCATION: Include 'SEND_LOCATION_NOW' and provide address")
-    if "brochure_request" in detected_intents:
-        intent_actions.append("🎯 USER WANTS BROCHURE: Include 'SEND_BROCHURE_NOW' and describe brochure")
-    if "visit_request" in detected_intents:
-        intent_actions.append("🎯 USER WANTS VISIT: Provide Mr. Nilesh's contact (7600612701)")
-    if "pricing_inquiry" in detected_intents:
-        intent_actions.append("🎯 PRICING QUERY: Direct to agents (8238477697/9974812701)")
-    if "positive_response" in detected_intents:
-        intent_actions.append("🎯 POSITIVE RESPONSE: Continue conversation naturally based on context")
-    
-    # Build stage-specific approach
-    stage_approaches = {
-        "initial": "Be welcoming and introduce key features. Ask about preferences.",
-        "interested": "Build on their interest. Provide specific details they seek.",
-        "serious": "Focus on benefits and move towards scheduling a visit.",
-        "ready_to_visit": "Facilitate visit booking and maintain excitement."
-    }
-    
-    return {
-        "user_stage": user_profile["stage"],
-        "user_interests": ", ".join(user_profile["interests"]) or "None yet",
-        "language": user_profile["language"],
-        "last_intent": user_profile.get("last_intent", "None"),
-        "intent_actions": "\n".join(intent_actions) or "No specific actions needed",
-        "stage_approach": stage_approaches.get(user_profile["stage"], "Be helpful and engaging"),
-        "context": context
-    }
+# LLM is now initialized above with gemini_chat
 
 # ================================================
 # TRANSLATION FUNCTIONS
 # ================================================
 def translate_gujarati_to_english(text):
-    """Translate Gujarati text to English"""
+    """Translate Gujarati text to English using Gemini"""
     try:
+        if not gemini_model:
+            logging.error("❌ Gemini model not available for translation")
+            return text
+            
         translation_prompt = f"""
 Translate the following Gujarati text to English. Provide only the English translation, nothing else.
 
@@ -330,15 +204,24 @@ Gujarati text: {text}
 
 English translation:
         """
-        response = translator_llm.invoke(translation_prompt)
-        return response.content.strip()
+        
+        logging.info(f"🔄 Translating Gujarati to English: {text[:50]}...")
+        response = gemini_model.generate_content(translation_prompt)
+        translated_text = response.text.strip()
+        logging.info(f"✅ Translation result: {translated_text[:50]}...")
+        return translated_text
+        
     except Exception as e:
-        logging.error(f"❌ Error translating Gujarati to English: {e}")
+        logging.error(f"❌ Error translating Gujarati to English with Gemini: {e}")
         return text  # Return original text if translation fails
 
 def translate_english_to_gujarati(text):
-    """Translate English text to Gujarati"""
+    """Translate English text to Gujarati using Gemini"""
     try:
+        if not gemini_model:
+            logging.error("❌ Gemini model not available for translation")
+            return text
+            
         translation_prompt = f"""
 Translate the following English text to Gujarati. Keep the same tone, style, and LENGTH - make it brief and concise like the original. Provide only the Gujarati translation, nothing else.
 
@@ -346,14 +229,19 @@ English text: {text}
 
 Gujarati translation (keep it brief and concise):
         """
-        response = translator_llm.invoke(translation_prompt)
-        return response.content.strip()
+        
+        logging.info(f"🔄 Translating English to Gujarati: {text[:50]}...")
+        response = gemini_model.generate_content(translation_prompt)
+        translated_text = response.text.strip()
+        logging.info(f"✅ Translation result: {translated_text[:50]}...")
+        return translated_text
+        
     except Exception as e:
-        logging.error(f"❌ Error translating English to Gujarati: {e}")
+        logging.error(f"❌ Error translating English to Gujarati with Gemini: {e}")
         return text  # Return original text if translation fails
 
 # ================================================
-# CONVERSATION STATE & CONTEXT ANALYSIS
+# CONVERSATION STATE & CONTEXT ANALYSIS WITH GEMINI
 # ================================================
 CONV_STATE = {}
 
@@ -363,225 +251,167 @@ def ensure_conversation_state(from_phone):
         CONV_STATE[from_phone] = {
             "chat_history": [], 
             "language": "english", 
-            "conversation_context": "",  # Summary of ongoing conversation topic
-            "last_bot_question": "",     # Last question asked by bot
-            "user_profile": {            # Build user profile over time
-                "interests": set(),
-                "preferences": {},
-                "stage": "initial"       # initial, interested, serious, ready_to_visit
-            },
-            "conversation_flow": [],     # Track the flow of conversation
-            "is_first_message": True
+            "waiting_for": None,
+            "last_context_topics": [],
+            "user_interests": [],
+            "last_follow_up": None,  # Store the last follow-up question asked
+            "follow_up_context": None,  # Store context for the follow-up
+            "is_first_message": True,  # Track if this is the first interaction
+            "conversation_summary": "",  # Gemini-generated conversation summary
+            "user_preferences": {}  # AI-inferred user preferences
         }
     else:
-        # Ensure all required fields exist for backwards compatibility
-        if "conversation_context" not in CONV_STATE[from_phone]:
-            CONV_STATE[from_phone]["conversation_context"] = ""
-        if "last_bot_question" not in CONV_STATE[from_phone]:
-            CONV_STATE[from_phone]["last_bot_question"] = ""
-        if "user_profile" not in CONV_STATE[from_phone]:
-            CONV_STATE[from_phone]["user_profile"] = {
-                "interests": set(),
-                "preferences": {},
-                "stage": "initial"
-            }
-        if "conversation_flow" not in CONV_STATE[from_phone]:
-            CONV_STATE[from_phone]["conversation_flow"] = []
+        # Ensure all required fields exist
+        if "waiting_for" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["waiting_for"] = None
+        if "last_context_topics" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["last_context_topics"] = []
+        if "user_interests" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["user_interests"] = []
+        if "last_follow_up" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["last_follow_up"] = None
+        if "follow_up_context" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["follow_up_context"] = None
+        if "is_first_message" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["is_first_message"] = True
+        if "conversation_summary" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["conversation_summary"] = ""
+        if "user_preferences" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["user_preferences"] = {}
 
-def analyze_conversation_intent(message_text, state):
-    """Analyze user message to understand intent and context"""
-    # Convert message to lowercase for analysis
+def update_conversation_memory_with_gemini(state, user_message, bot_response):
+    """Use Gemini to analyze and update conversation memory"""
+    try:
+        if not gemini_model:
+            return
+        
+        # Only update memory every few messages to avoid too many API calls
+        if len(state["chat_history"]) % 4 != 0:
+            return
+            
+        recent_history = state["chat_history"][-8:]  # Last 4 exchanges
+        history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in recent_history])
+        
+        memory_prompt = f"""
+Analyze this real estate conversation and extract:
+1. User's key interests and preferences
+2. Important conversation points to remember
+3. User's likely budget range or property requirements
+4. Any specific questions or concerns raised
+
+Conversation History:
+{history_text}
+
+Current Summary: {state.get('conversation_summary', 'New conversation')}
+
+Provide a concise updated summary (max 100 words) and key user preferences in JSON format:
+{{
+    "summary": "brief conversation summary",
+    "preferences": {{
+        "budget_range": "inferred budget or 'unknown'",
+        "preferred_bhk": "3BHK/4BHK/both/unknown",
+        "key_interests": ["list", "of", "interests"],
+        "concerns": ["any", "concerns", "raised"],
+        "visit_intent": "high/medium/low/unknown"
+    }}
+}}
+        """
+        
+        response = gemini_model.generate_content(memory_prompt)
+        
+        # Try to parse JSON response
+        try:
+            import json
+            memory_data = json.loads(response.text.strip())
+            state["conversation_summary"] = memory_data.get("summary", "")
+            state["user_preferences"].update(memory_data.get("preferences", {}))
+            logging.info(f"🧠 Updated conversation memory for user")
+        except:
+            # If JSON parsing fails, just store as text summary
+            state["conversation_summary"] = response.text.strip()[:200]
+            
+    except Exception as e:
+        logging.error(f"❌ Error updating conversation memory: {e}")
+
+def analyze_user_interests(message_text, state):
+    """Analyze user message to understand their interests (keyword-based fallback)"""
     message_lower = message_text.lower()
+    interests = []
     
-    # Define intent categories dynamically based on message content
-    intents = {
-        "location_request": False,
-        "brochure_request": False,
-        "pricing_inquiry": False,
-        "amenities_inquiry": False,
-        "visit_request": False,
-        "general_inquiry": False,
-        "positive_response": False,
-        "negative_response": False,
-        "specific_unit_inquiry": False
+    # Interest categories - these help understand user intent
+    interest_keywords = {
+        "pricing": ["price", "cost", "budget", "expensive", "cheap", "affordable", "rate"],
+        "size": ["size", "area", "bhk", "bedroom", "space", "sqft", "square"],
+        "amenities": ["amenities", "facilities", "gym", "pool", "parking", "security"],
+        "location": ["location", "address", "nearby", "connectivity", "metro", "airport"],
+        "availability": ["available", "ready", "possession", "when", "booking"],
+        "visit": ["visit", "see", "tour", "show", "check", "viewing"]
     }
     
-    # Simple intent detection without hardcoding specific keywords
-    # This uses semantic understanding rather than exact keyword matching
-    if any(word in message_lower for word in ["location", "address", "where", "place", "કયાં", "સરનામું", "લોકેશન", "એડ્રેસ", "સ્થળ"]):
-        intents["location_request"] = True
+    for category, keywords in interest_keywords.items():
+        if any(keyword in message_lower for keyword in keywords):
+            interests.append(category)
     
-    if any(word in message_lower for word in ["brochure", "details", "information", "બ્રોશર", "વિગત", "માહિતી", "ડિટેલ્સ"]):
-        intents["brochure_request"] = True
+    # Update user interests (keep last 5 to avoid memory bloat)
+    state["user_interests"].extend(interests)
+    state["user_interests"] = list(set(state["user_interests"][-5:]))
     
-    if any(word in message_lower for word in ["price", "cost", "budget", "rate", "કિંમત", "ભાવ", "દર", "રેટ"]):
-        intents["pricing_inquiry"] = True
-    
-    if any(word in message_lower for word in ["amenities", "facilities", "gym", "pool", "સુવિધા", "સુવિધાઓ", "જીમ", "પૂલ"]):
-        intents["amenities_inquiry"] = True
-    
-    if any(word in message_lower for word in ["visit", "see", "tour", "show", "મુલાકાત", "જોવા", "દેખાડો", "બતાવો"]):
-        intents["visit_request"] = True
-    
-    if any(word in message_lower for word in ["yes", "okay", "sure", "good", "હા", "જોઈએ", "બરાબર", "સારું"]):
-        intents["positive_response"] = True
-    
-    if any(word in message_lower for word in ["no", "not", "later", "ના", "નહીં", "પછી"]):
-        intents["negative_response"] = True
-    
-    if any(word in message_lower for word in ["3bhk", "4bhk", "bedroom", "bhk", "બેડરૂમ"]):
-        intents["specific_unit_inquiry"] = True
-    
-    # If no specific intent detected, it's a general inquiry
-    if not any(intents.values()):
-        intents["general_inquiry"] = True
-    
-    # Update user profile based on intents
-    for intent, detected in intents.items():
-        if detected:
-            state["user_profile"]["interests"].add(intent)
-    
-    return intents
+    return interests
 
-def update_conversation_context(state, user_message, bot_response, intents):
-    """Update conversation context and flow"""
-    # Update conversation flow
-    flow_entry = {
-        "user_message": user_message,
-        "intents": [k for k, v in intents.items() if v],
-        "bot_response": bot_response[:100] + "..." if len(bot_response) > 100 else bot_response
+def analyze_user_interests_with_gemini(message_text, state):
+    """Enhanced user interest analysis using Gemini AI"""
+    try:
+        if not gemini_model:
+            return analyze_user_interests(message_text, state)  # Fallback to keyword-based
+        
+        interest_prompt = f"""
+Analyze this real estate inquiry and identify the user's interests/intent:
+
+User Message: "{message_text}"
+Previous Interests: {state.get('user_interests', [])}
+
+Categorize interests from: pricing, size, amenities, location, availability, visit, brochure, general_info
+
+Return only a comma-separated list of relevant categories. Example: "pricing, size, visit"
+        """
+        
+        response = gemini_model.generate_content(interest_prompt)
+        interests = [interest.strip() for interest in response.text.strip().split(",") if interest.strip()]
+        
+        # Update user interests (keep last 5 to avoid memory bloat)
+        state["user_interests"].extend(interests)
+        state["user_interests"] = list(set(state["user_interests"][-5:]))
+        
+        return interests
+        
+    except Exception as e:
+        logging.error(f"❌ Error in Gemini interest analysis: {e}")
+        return analyze_user_interests(message_text, state)  # Fallback
+
+def analyze_user_interests(message_text, state):
+    """Analyze user message to understand their interests"""
+    message_lower = message_text.lower()
+    interests = []
+    
+    # Interest categories - these help understand user intent
+    interest_keywords = {
+        "pricing": ["price", "cost", "budget", "expensive", "cheap", "affordable", "rate"],
+        "size": ["size", "area", "bhk", "bedroom", "space", "sqft", "square"],
+        "amenities": ["amenities", "facilities", "gym", "pool", "parking", "security"],
+        "location": ["location", "address", "nearby", "connectivity", "metro", "airport"],
+        "availability": ["available", "ready", "possession", "when", "booking"],
+        "visit": ["visit", "see", "tour", "show", "check", "viewing"]
     }
-    state["conversation_flow"].append(flow_entry)
     
-    # Keep only last 5 exchanges to manage memory
-    if len(state["conversation_flow"]) > 5:
-        state["conversation_flow"] = state["conversation_flow"][-5:]
+    for category, keywords in interest_keywords.items():
+        if any(keyword in message_lower for keyword in keywords):
+            interests.append(category)
     
-    # Update conversation context summary
-    primary_intents = [k for k, v in intents.items() if v]
-    if primary_intents:
-        state["conversation_context"] = f"User is interested in: {', '.join(primary_intents)}. Last discussed: {primary_intents[0]}"
+    # Update user interests (keep last 5 to avoid memory bloat)
+    state["user_interests"].extend(interests)
+    state["user_interests"] = list(set(state["user_interests"][-5:]))
     
-    # Update user stage based on behavior
-    interests_count = len(state["user_profile"]["interests"])
-    if interests_count >= 3:
-        state["user_profile"]["stage"] = "serious"
-    elif interests_count >= 1:
-        state["user_profile"]["stage"] = "interested"
-    
-    if "visit_request" in state["user_profile"]["interests"]:
-        state["user_profile"]["stage"] = "ready_to_visit"
-
-def build_conversation_memory(state):
-    """Build a smart conversation memory summary"""
-    if not state["conversation_flow"]:
-        return "First conversation with user."
-    
-    # Get recent conversation flow
-    recent_flow = state["conversation_flow"][-3:]  # Last 3 exchanges
-    memory_parts = []
-    
-    # Add conversation stage context
-    stage = state["user_profile"]["stage"]
-    stage_context = {
-        "initial": "User is just starting to explore",
-        "interested": "User has shown interest in specific aspects",
-        "serious": "User is seriously considering the property",
-        "ready_to_visit": "User is ready for a site visit"
-    }
-    memory_parts.append(f"User Stage: {stage_context.get(stage, stage)}")
-    
-    # Add recent conversation topics
-    if state["conversation_context"]:
-        memory_parts.append(f"Current Context: {state['conversation_context']}")
-    
-    # Add last bot question if there was one
-    if state["last_bot_question"]:
-        memory_parts.append(f"Last Question Asked: {state['last_bot_question']}")
-    
-    # Add interest summary
-    interests = list(state["user_profile"]["interests"])
-    if interests:
-        memory_parts.append(f"User has shown interest in: {', '.join(interests)}")
-    
-    return " | ".join(memory_parts)
-
-def build_smart_system_prompt(state, context, search_query, conversation_memory, intents):
-    """Build an intelligent system prompt based on conversation state"""
-    
-    # Language specific instructions
-    language_instruction = ""
-    if state["language"] == "gujarati":
-        language_instruction = """
-LANGUAGE: User is asking in Gujarati. Respond in ENGLISH first (keep it concise), it will be translated automatically.
-"""
-    
-    # Intent-specific handling
-    intent_handling = ""
-    active_intents = [k for k, v in intents.items() if v]
-    
-    if "location_request" in active_intents:
-        intent_handling += "\n🎯 USER WANTS LOCATION: Include 'SEND_LOCATION_NOW' in your response and provide address details."
-    
-    if "brochure_request" in active_intents:
-        intent_handling += "\n🎯 USER WANTS BROCHURE: Include 'SEND_BROCHURE_NOW' in your response and mention brochure details."
-    
-    if "positive_response" in active_intents and state["last_bot_question"]:
-        intent_handling += f"\n🎯 USER RESPONDED POSITIVELY to your question: '{state['last_bot_question']}' - Continue naturally based on what they agreed to."
-    
-    if "visit_request" in active_intents:
-        intent_handling += "\n🎯 USER WANTS TO VISIT: Provide contact details for booking - Mr. Nilesh at 7600612701."
-    
-    if "pricing_inquiry" in active_intents:
-        intent_handling += "\n🎯 USER ASKING ABOUT PRICING: Direct them to agents at 8238477697 or 9974812701 for latest rates."
-    
-    # Conversation stage specific guidance
-    stage_guidance = ""
-    user_stage = state["user_profile"]["stage"]
-    
-    if user_stage == "initial":
-        stage_guidance = "\n📋 APPROACH: Be welcoming and introduce key features. Ask about their preferences."
-    elif user_stage == "interested": 
-        stage_guidance = "\n📋 APPROACH: Build on their interest. Provide specific details they're looking for."
-    elif user_stage == "serious":
-        stage_guidance = "\n📋 APPROACH: User is seriously interested. Focus on convincing and moving towards visit."
-    elif user_stage == "ready_to_visit":
-        stage_guidance = "\n📋 APPROACH: User is ready to visit. Facilitate the visit booking and maintain excitement."
-    
-    return f"""You are a friendly, professional real estate assistant for Brookstone - a luxury residential project.
-
-CONVERSATION MEMORY: {conversation_memory}
-
-{language_instruction}
-
-CORE PRINCIPLES:
-- Be conversational and natural
-- Keep responses concise (2-3 sentences max)
-- Always mention "Brookstone offers luxurious 3&4BHK flats" when discussing units
-- Use 2-3 relevant emojis per response
-- Ask ONE follow-up question to continue conversation
-- Be convincing but not pushy
-
-{intent_handling}
-
-{stage_guidance}
-
-SPECIAL ACTIONS:
-- Include "SEND_LOCATION_NOW" when user asks for location/address
-- Include "SEND_BROCHURE_NOW" when user asks for brochure/details
-- These triggers will automatically send the actual location/brochure
-
-STANDARD INFORMATION:
-- Office Hours: 10:30 AM to 7:00 PM daily
-- Site Visit Booking: Mr. Nilesh at 7600612701
-- General Queries: 8238477697 or 9974812701
-
-KNOWLEDGE BASE:
-{context}
-
-USER QUERY: {search_query}
-
-Provide a natural, contextual response that continues the conversation flow:"""
+    return interests
 
 # ================================================
 # WHATSAPP FUNCTIONS
@@ -672,8 +502,6 @@ def mark_message_as_read(message_id):
 def process_incoming_message(from_phone, message_text, message_id):
     ensure_conversation_state(from_phone)
     state = CONV_STATE[from_phone]
-    
-    # Detect language
     guj = any("\u0A80" <= c <= "\u0AFF" for c in message_text)
     state["language"] = "gujarati" if guj else "english"
     state["chat_history"].append({"role": "user", "content": message_text})
@@ -687,10 +515,82 @@ def process_incoming_message(from_phone, message_text, message_id):
         send_whatsapp_text(from_phone, welcome_text)
         return
 
-    # Analyze conversation intent for better context understanding
-    intents = analyze_conversation_intent(message_text, state)
+    # Analyze user interests for better follow-up questions (using Gemini)
+    current_interests = analyze_user_interests_with_gemini(message_text, state)
     
-    logging.info(f"📱 Processing message from {from_phone}: {message_text} [Language: {state['language']}] [Intents: {[k for k,v in intents.items() if v]}] [Stage: {state['user_profile']['stage']}]")
+    logging.info(f"📱 Processing message from {from_phone}: {message_text} [Language: {state['language']}] [Interests: {current_interests}]")
+
+    # Check for follow-up responses
+    message_lower = message_text.lower().strip()
+    
+    # Handle location confirmation
+    if state.get("waiting_for") == "location_confirmation":
+        if any(word in message_lower for word in ["yes", "yeah", "yep", "sure", "please", "ok", "okay", "send", "हाँ", "હા"]):
+            state["waiting_for"] = None
+            state["last_follow_up"] = None  # Clear previous follow-up
+            send_whatsapp_location(from_phone)
+            confirmation_text = "📍 Here's our location! We're open from 10:30 AM to 7:00 PM. Looking forward to see you! 🏠✨"
+            if state["language"] == "gujarati":
+                confirmation_text = translate_english_to_gujarati(confirmation_text)
+            send_whatsapp_text(from_phone, confirmation_text)
+            return
+        elif any(word in message_lower for word in ["no", "nope", "not now", "later", "નહીં", "ના"]):
+            state["waiting_for"] = None
+            state["last_follow_up"] = None  # Clear previous follow-up
+            decline_text = "No problem! Feel free to ask if you need anything else. You can contact our agents at 8238477697 or 9974812701 anytime! ��😊"
+            if state["language"] == "gujarati":
+                decline_text = translate_english_to_gujarati(decline_text)
+            send_whatsapp_text(from_phone, decline_text)
+            return
+    
+    # Handle brochure confirmation
+    if state.get("waiting_for") == "brochure_confirmation":
+        if any(word in message_lower for word in ["yes", "yeah", "yep", "sure", "please", "send", "brochure", "pdf", "हाँ", "હા"]):
+            state["waiting_for"] = None
+            state["last_follow_up"] = None  # Clear previous follow-up
+            send_whatsapp_document(from_phone)
+            brochure_text = "📄 Here's your Brookstone brochure! It has all the details about our luxury 3&4BHK flats. Any questions after going through it? ✨😊"
+            if state["language"] == "gujarati":
+                brochure_text = translate_english_to_gujarati(brochure_text)
+            send_whatsapp_text(from_phone, brochure_text)
+            return
+        elif any(word in message_lower for word in ["no", "not now", "later", "નહીં", "ના"]):
+            state["waiting_for"] = None
+            state["last_follow_up"] = None  # Clear previous follow-up
+            later_text = "Sure! Let me know if you'd like the brochure later or have any other questions about Brookstone. 🏠�"
+            if state["language"] == "gujarati":
+                later_text = translate_english_to_gujarati(later_text)
+            send_whatsapp_text(from_phone, later_text)
+            return
+    
+    # Handle ambiguous responses (when user says "sure" but it's unclear what they want)
+    if state.get("waiting_for") == "clarification_needed":
+        # Check if user wants layout/details
+        if any(word in message_lower for word in ["layout", "details", "size", "area", "plan", "floor", "design", "લેઆઉટ", "વિગત"]):
+            state["waiting_for"] = "brochure_confirmation"
+            state["last_follow_up"] = None  # Clear previous follow-up
+            clarify_text = "Great! Would you like me to send you our detailed brochure with all floor plans and specifications? 📄✨"
+            if state["language"] == "gujarati":
+                clarify_text = translate_english_to_gujarati(clarify_text)
+            send_whatsapp_text(from_phone, clarify_text)
+            return
+        # Check if user wants site visit
+        elif any(word in message_lower for word in ["visit", "site", "see", "tour", "book", "appointment", "schedule", "મુલાકાત", "સાઇટ"]):
+            state["waiting_for"] = None
+            state["last_follow_up"] = None  # Clear previous follow-up
+            visit_text = "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit. He'll help you schedule a convenient time. 📞✨"
+            if state["language"] == "gujarati":
+                visit_text = translate_english_to_gujarati(visit_text)
+            send_whatsapp_text(from_phone, visit_text)
+            return
+        else:
+            # If still unclear, ask again
+            state["waiting_for"] = None
+            unclear_text = "I want to help you properly! Are you interested in seeing the layout details and brochure, or would you like to schedule a site visit? 🏠✨"
+            if state["language"] == "gujarati":
+                unclear_text = translate_english_to_gujarati(unclear_text)
+            send_whatsapp_text(from_phone, unclear_text)
+            return
 
     if not retriever:
         error_text = "Please contact our agents at 8238477697 or 9974812701 for more info."
@@ -706,7 +606,6 @@ def process_incoming_message(from_phone, message_text, message_id):
             search_query = translate_gujarati_to_english(message_text)
             logging.info(f"🔄 Translated query: {search_query}")
 
-        # Retrieve relevant documents
         docs = retriever.invoke(search_query)
         logging.info(f"📚 Retrieved {len(docs)} relevant documents")
 
@@ -714,39 +613,139 @@ def process_incoming_message(from_phone, message_text, message_id):
             [(d.page_content or "") + ("\n" + "\n".join(f"{k}: {v}" for k, v in (d.metadata or {}).items())) for d in docs]
         )
 
-        # Build conversation memory for better context
-        conversation_memory = build_conversation_memory(state)
-        
-        # Build smart system prompt based on conversation state
-        system_prompt = build_smart_system_prompt(state, context, search_query, conversation_memory, intents)
+        # Store current context topics for future reference
+        state["last_context_topics"] = [d.metadata.get("topic", "") for d in docs if d.metadata.get("topic")]
 
-        # Get LLM response
-        response = llm.invoke(system_prompt).content.strip()
+        # Enhanced system prompt with Gemini-generated user context and memory
+        user_context = f"User's previous interests: {', '.join(state['user_interests'])}" if state['user_interests'] else "New conversation"
+        
+        # Include Gemini-generated conversation summary and preferences
+        conversation_context = ""
+        if state.get("conversation_summary"):
+            conversation_context = f"\nCONVERSATION SUMMARY: {state['conversation_summary']}"
+        
+        user_preferences = state.get("user_preferences", {})
+        preferences_context = ""
+        if user_preferences:
+            pref_items = []
+            if user_preferences.get("budget_range", "unknown") != "unknown":
+                pref_items.append(f"Budget: {user_preferences['budget_range']}")
+            if user_preferences.get("preferred_bhk", "unknown") != "unknown":
+                pref_items.append(f"Preferred: {user_preferences['preferred_bhk']}")
+            if user_preferences.get("key_interests"):
+                pref_items.append(f"Interests: {', '.join(user_preferences['key_interests'])}")
+            if user_preferences.get("visit_intent", "unknown") != "unknown":
+                pref_items.append(f"Visit Intent: {user_preferences['visit_intent']}")
+            
+            if pref_items:
+                preferences_context = f"\nUSER PREFERENCES: {' | '.join(pref_items)}"
+        
+        # Include memory of last follow-up question
+        follow_up_memory = ""
+        if state.get("last_follow_up"):
+            follow_up_memory = f"\nRECENT FOLLOW-UP: I recently asked '{state['last_follow_up']}' and user is now responding to that question."
+        
+        # Determine language for system prompt
+        language_instruction = ""
+        if state["language"] == "gujarati":
+            language_instruction = "IMPORTANT: User is asking in Gujarati. Respond in ENGLISH first (keep it VERY SHORT), then it will be translated to Gujarati automatically. The Gujarati translation should also be brief and concise."
+        
+        system_prompt = f"""
+You are a friendly real estate assistant for Brookstone project. Be conversational, natural, and convincing.
+
+{language_instruction}
+
+CORE INSTRUCTIONS:
+- Be VERY CONCISE - give brief, direct answers (2-3 sentences max)
+- Answer using context below when available
+- Use 2-3 relevant emojis to make responses engaging
+- Keep responses WhatsApp-friendly
+- Do NOT invent details
+- Remember conversation flow and previous follow-ups
+- ALWAYS try to convince user in a friendly way
+- Use the conversation memory and user preferences provided
+
+MEMORY CONTEXT: {follow_up_memory}{conversation_context}{preferences_context}
+
+MANDATORY FLAT MENTIONS:
+- ALWAYS say "Brookstone offers luxurious 3&4BHK flats" (mention both types)
+- Even if user asks only about 3BHK or 4BHK, mention both options
+- This showcases our complete offering
+
+SPECIAL HANDLING:
+
+1. TIMINGS: "Our site office is open from *10:30 AM to 7:00 PM* every day. Would you like me to send you the location? 📍"
+
+2. SITE VISIT BOOKING: "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit. 📞✨"
+
+3. GENERAL QUERIES: "You can contact our agents at 8238477697 or 9974812701 for any queries. 📱😊"
+
+4. PRICING: Check context first. If no pricing info: "For latest pricing details, please contact our agents at 8238477697 or 9974812701. 💰📞"
+
+5. LOCATION REQUEST: "Would you like me to send you our location? 📍🏠"
+
+CONVINCING STRATEGY:
+- Use positive, enthusiastic language
+- Highlight luxury and quality aspects
+- Create urgency subtly ("perfect time to visit", "great opportunity")
+- Use emojis that convey excitement: 🏠✨🌟💎🎉😊🔥💫
+
+FOLLOW-UP STRATEGY:
+- If user is responding to a previous follow-up question, acknowledge it and provide relevant information
+- After answering, ask ONE simple follow-up question to continue conversation
+- Make follow-ups natural and contextual
+- This helps maintain conversation flow
+
+RESPONSE PATTERN:
+1. If responding to previous follow-up, acknowledge and answer appropriately
+2. Give brief answer from context (always mention 3&4BHK when relevant)
+3. Ask ONE clear follow-up question to keep conversation flowing
+
+USER CONTEXT: {user_context}
+
+CONVERSATION FLOW:
+- If user is answering my previous question, provide relevant info based on their response
+- Then naturally continue with another relevant question
+- Keep the conversation engaging and helpful
+- Always sound excited about Brookstone!
+
+Example Responses:
+- "Absolutely! Brookstone offers luxurious 3&4BHK flats 🏠✨ Would you like to know about the premium amenities? 🌟"
+- "Great choice! Our 4BHK units are part of Brookstone's luxurious 3&4BHK collection 💎 Interested in the spacious layouts? 📐"
+
+---
+Available Knowledge Context:
+{context}
+
+User Question: {search_query}
+
+Provide a brief, convincing answer with good emojis and ask ONE relevant follow-up question.
+Assistant:
+        """.strip()
+
+        # Use Gemini for generating response
+        if not gemini_chat:
+            error_text = "AI service unavailable. Please contact our agents at 8238477697 or 9974812701."
+            if state["language"] == "gujarati":
+                error_text = translate_english_to_gujarati(error_text)
+            send_whatsapp_text(from_phone, error_text)
+            return
+
+        response = gemini_chat.invoke(system_prompt).content.strip()
         logging.info(f"🧠 LLM Response: {response}")
 
-        # Translate response to Gujarati if needed
+        # Translate response to Gujarati if user language is Gujarati
         final_response = response
         if state["language"] == "gujarati":
             final_response = translate_english_to_gujarati(response)
             logging.info(f"🔄 Translated response: {final_response}")
 
-        # Remove action triggers from response before sending to user
-        clean_response = final_response.replace("SEND_LOCATION_NOW", "").replace("SEND_BROCHURE_NOW", "").strip()
-        
-        # Send text response
-        send_whatsapp_text(from_phone, clean_response)
+        # --- Send primary text response ---
+        send_whatsapp_text(from_phone, final_response)
 
-        # Handle automatic actions based on intents or LLM triggers
-        if "SEND_LOCATION_NOW" in response or intents.get("location_request", False):
-            send_whatsapp_location(from_phone)
-            logging.info(f"📍 Location sent to {from_phone} - Intent: {intents.get('location_request', False)}, LLM: {'SEND_LOCATION_NOW' in response}")
-            
-        if "SEND_BROCHURE_NOW" in response or intents.get("brochure_request", False):
-            send_whatsapp_document(from_phone)
-            logging.info(f"📄 Brochure sent to {from_phone} - Intent: {intents.get('brochure_request', False)}, LLM: {'SEND_BROCHURE_NOW' in response}")
-
-        # Extract and store the follow-up question for memory
-        sentences = clean_response.split('.')
+        # Store the follow-up question asked by the bot for memory
+        # Extract follow-up question from response (look for question marks)
+        sentences = final_response.split('.')
         follow_up_question = None
         for sentence in sentences:
             if '?' in sentence:
@@ -754,18 +753,51 @@ def process_incoming_message(from_phone, message_text, message_id):
                 break
         
         if follow_up_question:
-            state["last_bot_question"] = follow_up_question
-            logging.info(f"🧠 Stored follow-up question: {follow_up_question}")
+            state["last_follow_up"] = follow_up_question
+            state["follow_up_context"] = context[:500]  # Store some context for reference
+            logging.info(f"🧠 Stored follow-up: {follow_up_question}")
 
-        # Update conversation context and memory
-        update_conversation_context(state, message_text, clean_response, intents)
+        # --- Set conversation states based on bot's response ---
+        response_lower = response.lower()  # Use original English response for state detection
         
-        # Add to chat history
-        state["chat_history"].append({"role": "assistant", "content": clean_response})
+        # Check if bot is asking for location confirmation
+        if "would you like me to send" in response_lower and "location" in response_lower:
+            state["waiting_for"] = "location_confirmation"
+            logging.info(f"🎯 Set state to location_confirmation for {from_phone}")
+        
+        # Check if bot is asking multiple choice question (layout or site visit)
+        elif ("layout" in response_lower or "details" in response_lower) and ("site visit" in response_lower or "schedule" in response_lower):
+            state["waiting_for"] = "clarification_needed"
+            logging.info(f"🎯 Set state to clarification_needed for {from_phone}")
+        
+        # Check if bot mentioned site visit booking contact
+        elif "mr. nilesh" in response_lower or "7600612701" in response_lower:
+            # Bot already provided site visit booking info, no state change needed
+            logging.info(f"📞 Site visit booking info provided to {from_phone}")
+        
+        # Check if bot is asking for brochure
+        elif "would you like" in response_lower and ("brochure" in response_lower or "send you" in response_lower):
+            state["waiting_for"] = "brochure_confirmation"
+            logging.info(f"🎯 Set state to brochure_confirmation for {from_phone}")
+        
+        # Check if bot mentioned agent contact numbers
+        elif "8238477697" in response_lower or "9974812701" in response_lower:
+            # Bot already provided agent contact info, no state change needed
+            logging.info(f"📞 Agent contact info provided to {from_phone}")
 
-        # Keep chat history manageable (last 10 messages)
-        if len(state["chat_history"]) > 10:
-            state["chat_history"] = state["chat_history"][-10:]
+        # Legacy intent detection for immediate actions (without confirmation)
+        if re.search(r"\bsend.*location\b|\bhere.*location\b", response_lower) and state.get("waiting_for") != "location_confirmation":
+            logging.info(f"📍 Legacy location trigger for {from_phone}")
+            send_whatsapp_location(from_phone)
+
+        elif re.search(r"\bhere.*brochure\b|\bsending.*brochure\b", response_lower) and state.get("waiting_for") != "brochure_confirmation":
+            logging.info(f"📄 Legacy brochure trigger for {from_phone}")
+            send_whatsapp_document(from_phone)
+
+        state["chat_history"].append({"role": "assistant", "content": final_response})
+        
+        # Update conversation memory using Gemini
+        update_conversation_memory_with_gemini(state, message_text, final_response)
 
     except Exception as e:
         logging.error(f"❌ Error in RAG processing: {e}")
@@ -773,6 +805,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         if state["language"] == "gujarati":
             error_text = translate_english_to_gujarati(error_text)
         send_whatsapp_text(from_phone, error_text)
+
 # ================================================
 # WEBHOOK ROUTES
 # ================================================
@@ -832,7 +865,7 @@ def health():
     return jsonify({
         "status": "healthy",
         "whatsapp_configured": bool(WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID),
-        "openai_configured": bool(OPENAI_API_KEY),
+        "gemini_configured": bool(GEMINI_API_KEY and gemini_model and gemini_embeddings and gemini_chat),
         "pinecone_configured": bool(PINECONE_API_KEY)
     }), 200
 

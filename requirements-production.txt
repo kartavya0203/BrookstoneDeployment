@@ -1,0 +1,15 @@
+# BROOKSTONE WHATSAPP BOT - MINIMAL PRODUCTION REQUIREMENTS
+
+# Core Dependencies
+flask>=2.3.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# AI & Vector Database
+langchain-pinecone>=0.1.0
+langchain-google-genai>=1.0.0
+google-generativeai>=0.8.0
+langchain-core>=0.2.0
+
+# Production Server
+gunicorn>=21.2.0
