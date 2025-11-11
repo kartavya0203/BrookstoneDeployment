@@ -197,7 +197,6 @@ def ensure_conversation_state(from_phone):
         CONV_STATE[from_phone] = {
             "chat_history": [], 
             "language": "english", 
-            "waiting_for": None,
             "last_context_topics": [],
             "user_interests": [],
             "last_follow_up": None,  # Store the last follow-up question asked
@@ -206,8 +205,6 @@ def ensure_conversation_state(from_phone):
         }
     else:
         # Ensure all required fields exist
-        if "waiting_for" not in CONV_STATE[from_phone]:
-            CONV_STATE[from_phone]["waiting_for"] = None
         if "last_context_topics" not in CONV_STATE[from_phone]:
             CONV_STATE[from_phone]["last_context_topics"] = []
         if "user_interests" not in CONV_STATE[from_phone]:
@@ -351,88 +348,6 @@ def process_incoming_message(from_phone, message_text, message_id):
     
     logging.info(f"📱 Processing message from {from_phone}: {message_text} [Language: {state['language']}] [Interests: {current_interests}]")
 
-    # Let LLM handle all follow-up responses intelligently instead of hardcoded keywords
-    # This enables natural understanding of both English and Gujarati responses
-
-    if not retriever:
-        error_text = "Please contact our agents at 8238477697 or 9974812701 for more info."
-        if state["language"] == "gujarati":
-            error_text = translate_english_to_gujarati(error_text)
-        send_whatsapp_text(from_phone, error_text)
-        return
-
-    # Check for follow-up responses
-    message_lower = message_text.lower().strip()
-    
-    # Handle location confirmation
-    if state.get("waiting_for") == "location_confirmation":
-        if any(word in message_lower for word in ["yes", "yeah", "yep", "sure", "please", "ok", "okay", "send", "हाँ", "હા"]):
-            state["waiting_for"] = None
-            state["last_follow_up"] = None  # Clear previous follow-up
-            send_whatsapp_location(from_phone)
-            confirmation_text = "📍 Here's our location! We're open from 10:30 AM to 7:00 PM. Looking forward to see you! 🏠✨"
-            if state["language"] == "gujarati":
-                confirmation_text = translate_english_to_gujarati(confirmation_text)
-            send_whatsapp_text(from_phone, confirmation_text)
-            return
-        elif any(word in message_lower for word in ["no", "nope", "not now", "later", "નહીં", "ના"]):
-            state["waiting_for"] = None
-            state["last_follow_up"] = None  # Clear previous follow-up
-            decline_text = "No problem! Feel free to ask if you need anything else. You can contact our agents at 8238477697 or 9974812701 anytime! ��😊"
-            if state["language"] == "gujarati":
-                decline_text = translate_english_to_gujarati(decline_text)
-            send_whatsapp_text(from_phone, decline_text)
-            return
-    
-    # Handle brochure confirmation
-    if state.get("waiting_for") == "brochure_confirmation":
-        if any(word in message_lower for word in ["yes", "yeah", "yep", "sure", "please", "send", "brochure", "pdf", "हाँ", "હા"]):
-            state["waiting_for"] = None
-            state["last_follow_up"] = None  # Clear previous follow-up
-            send_whatsapp_document(from_phone)
-            brochure_text = "📄 Here's your Brookstone brochure! It has all the details about our luxury 3&4BHK flats. Any questions after going through it? ✨😊"
-            if state["language"] == "gujarati":
-                brochure_text = translate_english_to_gujarati(brochure_text)
-            send_whatsapp_text(from_phone, brochure_text)
-            return
-        elif any(word in message_lower for word in ["no", "not now", "later", "નહીં", "ના"]):
-            state["waiting_for"] = None
-            state["last_follow_up"] = None  # Clear previous follow-up
-            later_text = "Sure! Let me know if you'd like the brochure later or have any other questions about Brookstone. 🏠�"
-            if state["language"] == "gujarati":
-                later_text = translate_english_to_gujarati(later_text)
-            send_whatsapp_text(from_phone, later_text)
-            return
-    
-    # Handle ambiguous responses (when user says "sure" but it's unclear what they want)
-    if state.get("waiting_for") == "clarification_needed":
-        # Check if user wants layout/details
-        if any(word in message_lower for word in ["layout", "details", "size", "area", "plan", "floor", "design", "લેઆઉટ", "વિગત"]):
-            state["waiting_for"] = "brochure_confirmation"
-            state["last_follow_up"] = None  # Clear previous follow-up
-            clarify_text = "Great! Would you like me to send you our detailed brochure with all floor plans and specifications? 📄✨"
-            if state["language"] == "gujarati":
-                clarify_text = translate_english_to_gujarati(clarify_text)
-            send_whatsapp_text(from_phone, clarify_text)
-            return
-        # Check if user wants site visit
-        elif any(word in message_lower for word in ["visit", "site", "see", "tour", "book", "appointment", "schedule", "મુલાકાત", "સાઇટ"]):
-            state["waiting_for"] = None
-            state["last_follow_up"] = None  # Clear previous follow-up
-            visit_text = "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit. He'll help you schedule a convenient time. 📞✨"
-            if state["language"] == "gujarati":
-                visit_text = translate_english_to_gujarati(visit_text)
-            send_whatsapp_text(from_phone, visit_text)
-            return
-        else:
-            # If still unclear, ask again
-            state["waiting_for"] = None
-            unclear_text = "I want to help you properly! Are you interested in seeing the layout details and brochure, or would you like to schedule a site visit? 🏠✨"
-            if state["language"] == "gujarati":
-                unclear_text = translate_english_to_gujarati(unclear_text)
-            send_whatsapp_text(from_phone, unclear_text)
-            return
-
     if not retriever:
         error_text = "Please contact our agents at 8238477697 or 9974812701 for more info."
         if state["language"] == "gujarati":
@@ -446,6 +361,34 @@ def process_incoming_message(from_phone, message_text, message_id):
         if state["language"] == "gujarati":
             search_query = translate_gujarati_to_english(message_text)
             logging.info(f"🔄 Translated query: {search_query}")
+
+        # Pre-check for direct Gujarati action keywords to ensure triggers are activated
+        message_lower = message_text.lower()
+        force_location = False
+        force_brochure = False
+        
+        # Check for location keywords in both English and Gujarati
+        location_keywords = [
+            "location", "address", "where", "कहाँ", "कयाँ", 
+            "કયાં", "સરનામું", "લોકેશન", "એડ્રેસ", "સ્થળ", "જગ્યા", 
+            "કયાં આવેલું", "ક્યાં છે", "send me address", "મોકલો સરનામું"
+        ]
+        
+        # Check for brochure keywords in both English and Gujarati  
+        brochure_keywords = [
+            "brochure", "details", "pdf", "document", "info", "information",
+            "બ્રોશર", "મોકલો", "મોકલજો", "આપો", "મળશે", "વિગત", "માહિતી", 
+            "ડિટેલ્સ", "કાગળ", "need brochure", "send brochure",
+            "વિગત આપો", "માહિતી આપો", "બ્રોશર જોઈએ"
+        ]
+        
+        if any(keyword in message_lower for keyword in location_keywords):
+            force_location = True
+            logging.info(f"🎯 Direct location keyword detected: {message_text}")
+            
+        if any(keyword in message_lower for keyword in brochure_keywords):
+            force_brochure = True
+            logging.info(f"🎯 Direct brochure keyword detected: {message_text}")
 
         docs = retriever.invoke(search_query)
         logging.info(f"📚 Retrieved {len(docs)} relevant documents")
@@ -486,15 +429,13 @@ CORE INSTRUCTIONS:
 
 MEMORY CONTEXT: {follow_up_memory}
 
-GUJARATI FOLLOW-UP RESPONSE HANDLING:
-- If I asked about location and user responds positively in Gujarati (હા, જોઈએ, મોકલો, ભેજો, આપો), send location and continue conversation
-- If I asked about brochure and user responds positively in Gujarati (હા, જોઈએ, આપો, બ્રોશર, વિગત), send brochure and continue conversation  
-- If I asked about site visit and user responds positively in Gujarati (હા, જોઈએ, મુલાકાત, જોવાનું), provide site visit booking info
-- If I asked about amenities and user responds positively in Gujarati (હા, જણાવો, બતાવો, સુવિધા), provide amenities info
-- If I asked about pricing and user responds positively in Gujarati (હા, જણાવો, કિંમત, ભાવ), provide pricing contact info
-- Always continue the conversation after addressing their response with a new relevant question
-
-FOLLOW-UP CONVERSATION EXAMPLES:
+        GUJARATI FOLLOW-UP RESPONSE HANDLING:
+- If user asks for location in Gujarati (કયાં આવેલું છે, સરનામું આપો, એડ્રેસ આપો), ALWAYS include SEND_LOCATION_NOW in response
+- If user asks for brochure in Gujarati (બ્રોશર મોકલો, વિગત આપો, માહિતી આપો, ડિટેલ્સ આપો), ALWAYS include SEND_BROCHURE_NOW in response
+- If user says "need brochure" or "બ્રોશર જોઈએ", ALWAYS include SEND_BROCHURE_NOW in response
+- If user says "send me address" or "સરનામું મોકલો", ALWAYS include SEND_LOCATION_NOW in response
+- If user responds positively (હા, જોઈએ, મોકલો, ભેજો, આપો), check previous context and send appropriate item
+- Always continue the conversation after addressing their response with a new relevant questionFOLLOW-UP CONVERSATION EXAMPLES:
 - After location: "Great! Our office is open 10:30 AM to 7:00 PM. Would you like to know about our luxury amenities? 🌟"
 - After brochure: "Perfect! The brochure has all details. Any specific questions about our 3&4BHK flats? 🏠"
 - After amenities: "Wonderful! We have premium facilities. Would you like to schedule a site visit? 📅"
@@ -519,15 +460,19 @@ SPECIAL HANDLING (ENGLISH & GUJARATI):
 4. PRICING: When user asks about rates/cost in English or Gujarati (કિંમત, ભાવ, રેટ, દર, પૈસા):
    Check context first. If no pricing info: "For latest pricing details, please contact our agents at 8238477697 or 9974812701. 💰📞"
 
-INTELLIGENT ACTION TRIGGERS:
+        INTELLIGENT ACTION TRIGGERS:
 When user asks for location/address in any language, include: "SEND_LOCATION_NOW" in your response
 When user asks for brochure/details in any language, include: "SEND_BROCHURE_NOW" in your response
 
-EXAMPLES:
-- User: "Where is it located?" or "કયાં આવેલું છે?" → Response: "SEND_LOCATION_NOW Great! Here's our location in Bopal, Ahmedabad. Would you like to know our office timings? 📍"
-- User: "Send me brochure" or "બ્રોશર મોકલો" → Response: "SEND_BROCHURE_NOW Perfect! Here's our detailed brochure with all information about luxury 3&4BHK flats. Any specific questions? 📄✨"
+GUJARATI KEYWORDS TO DETECT:
+- Location requests: કયાં, સરનામું, લોકેશન, એડ્રેસ, સ્થળ, જગ્યા, કયાં આવેલું, ક્યાં છે
+- Brochure requests: બ્રોશર, મોકલો, મોકલજો, આપો, મળશે, વિગત, માહિતી, ડિટેલ્સ, કાગળ
+- General positive responses: હા, હા જી, જોઈએ, બતાવો, જણાવો, ભેજો, મળે, આપશો
 
-IMPORTANT: The system will automatically detect these triggers and send the actual location/brochure via WhatsApp API, so you just need to include the trigger words in your response.
+EXAMPLES:
+- User: "Where is it located?" or "કયાં આવેલું છે?" or "સરનામું આપો" → Response: "SEND_LOCATION_NOW Great! Here's our location in Bopal, Ahmedabad. Would you like to know our office timings? 📍"
+- User: "Send me brochure" or "બ્રોશર મોકલો" or "વિગત આપો" → Response: "SEND_BROCHURE_NOW Perfect! Here's our detailed brochure with all information about luxury 3&4BHK flats. Any specific questions? 📄✨"
+- User: "need brochure" → Response: "SEND_BROCHURE_NOW Perfect! Here's our detailed brochure with all information about luxury 3&4BHK flats. Any specific questions? 📄✨"IMPORTANT: The system will automatically detect these triggers and send the actual location/brochure via WhatsApp API, so you just need to include the trigger words in your response.
 
 CONVINCING STRATEGY:
 - Use positive, enthusiastic language
@@ -589,14 +534,14 @@ Assistant:
         clean_response = final_response.replace("SEND_LOCATION_NOW", "").replace("SEND_BROCHURE_NOW", "").strip()
         send_whatsapp_text(from_phone, clean_response)
 
-        # --- Handle intelligent actions based on LLM response triggers ---
-        if "SEND_LOCATION_NOW" in final_response:
+        # --- Handle intelligent actions based on LLM response triggers OR forced detection ---
+        if "SEND_LOCATION_NOW" in final_response or force_location:
             send_whatsapp_location(from_phone)
-            logging.info(f"📍 Location sent to {from_phone} based on LLM intelligent detection")
+            logging.info(f"📍 Location sent to {from_phone} - LLM trigger: {'SEND_LOCATION_NOW' in final_response}, Force: {force_location}")
             
-        if "SEND_BROCHURE_NOW" in final_response:
+        if "SEND_BROCHURE_NOW" in final_response or force_brochure:
             send_whatsapp_document(from_phone)
-            logging.info(f"📄 Brochure sent to {from_phone} based on LLM intelligent detection")
+            logging.info(f"📄 Brochure sent to {from_phone} - LLM trigger: {'SEND_BROCHURE_NOW' in final_response}, Force: {force_brochure}")
 
         # Store the follow-up question asked by the bot for memory
         # Extract follow-up question from response (look for question marks)
@@ -611,10 +556,6 @@ Assistant:
             state["last_follow_up"] = follow_up_question
             state["follow_up_context"] = context[:500]  # Store some context for reference
             logging.info(f"🧠 Stored follow-up: {follow_up_question}")
-
-        # Clear any old waiting states since LLM now handles everything intelligently
-        if state.get("waiting_for"):
-            state["waiting_for"] = None
 
         state["chat_history"].append({"role": "assistant", "content": clean_response})
 
