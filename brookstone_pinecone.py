@@ -7,7 +7,7 @@ import os
 import re
 import logging
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Set, Any, Optional
 
 # Web Framework
@@ -36,7 +36,7 @@ from langchain.memory import (
     ConversationEntityMemory,
 )
 from langchain.chains import ConversationChain
-from langchain.memory.chat_message_histories import ChatMessageHistory
+from langchain_community.chat_message_histories import ChatMessageHistory
 
 # Load environment variables
 load_dotenv()
@@ -139,7 +139,7 @@ def upload_brochure_media() -> Optional[str]:
                 MEDIA_ID = new_media_id
                 state = {
                     "media_id": MEDIA_ID,
-                    "uploaded_at": datetime.utcnow().isoformat()
+                    "uploaded_at": datetime.now(timezone.utc).isoformat()
                 }
                 save_media_state(state)
                 logger.info(f"✅ Uploaded brochure media, id={MEDIA_ID}")
@@ -166,7 +166,7 @@ def ensure_media_up_to_date() -> None:
     if media_id and uploaded_at:
         try:
             uploaded_dt = datetime.fromisoformat(uploaded_at)
-            if datetime.utcnow() - uploaded_dt < timedelta(days=MEDIA_EXPIRY_DAYS):
+            if datetime.now(timezone.utc) - uploaded_dt < timedelta(days=MEDIA_EXPIRY_DAYS):
                 MEDIA_ID = media_id
                 need_upload = False
                 logger.info(f"ℹ️ Using existing media_id (uploaded {uploaded_at})")
@@ -197,7 +197,7 @@ def load_vectorstore() -> LangchainPinecone:
     embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
     pc = Pinecone(api_key=PINECONE_API_KEY)
     index = pc.Index(INDEX_NAME)
-    return LangchainPinecone(index, embeddings)
+    return LangchainPinecone(index, embeddings, text_key="text")
 
 
 # Initialize vectorstore and retriever
