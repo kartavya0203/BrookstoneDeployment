@@ -126,7 +126,7 @@ def ensure_media_up_to_date():
 # Initialize media state at startup (without scheduler)
 try:
     ensure_media_up_to_date()
-    logging.info(f"📱 Media management initialized. Use refresh_media.py for 29-day renewals.")
+    logging.info(f"� Media management initialized. Use refresh_media.py for 29-day renewals.")
 except Exception as e:
     logging.error(f"❌ Error initializing media: {e}")
 
@@ -353,6 +353,237 @@ Gujarati translation (keep it brief and concise):
         return text  # Return original text if translation fails
 
 # ================================================
+# CONVERSATION STATE & CONTEXT ANALYSIS
+# ================================================
+CONV_STATE = {}
+
+def ensure_conversation_state(from_phone):
+    """Ensure conversation state has all required fields"""
+    if from_phone not in CONV_STATE:
+        CONV_STATE[from_phone] = {
+            "chat_history": [], 
+            "language": "english", 
+            "conversation_context": "",  # Summary of ongoing conversation topic
+            "last_bot_question": "",     # Last question asked by bot
+            "user_profile": {            # Build user profile over time
+                "interests": set(),
+                "preferences": {},
+                "stage": "initial"       # initial, interested, serious, ready_to_visit
+            },
+            "conversation_flow": [],     # Track the flow of conversation
+            "is_first_message": True
+        }
+    else:
+        # Ensure all required fields exist for backwards compatibility
+        if "conversation_context" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["conversation_context"] = ""
+        if "last_bot_question" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["last_bot_question"] = ""
+        if "user_profile" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["user_profile"] = {
+                "interests": set(),
+                "preferences": {},
+                "stage": "initial"
+            }
+        if "conversation_flow" not in CONV_STATE[from_phone]:
+            CONV_STATE[from_phone]["conversation_flow"] = []
+
+def analyze_conversation_intent(message_text, state):
+    """Analyze user message to understand intent and context"""
+    # Convert message to lowercase for analysis
+    message_lower = message_text.lower()
+    
+    # Define intent categories dynamically based on message content
+    intents = {
+        "location_request": False,
+        "brochure_request": False,
+        "pricing_inquiry": False,
+        "amenities_inquiry": False,
+        "visit_request": False,
+        "general_inquiry": False,
+        "positive_response": False,
+        "negative_response": False,
+        "specific_unit_inquiry": False
+    }
+    
+    # Simple intent detection without hardcoding specific keywords
+    # This uses semantic understanding rather than exact keyword matching
+    if any(word in message_lower for word in ["location", "address", "where", "place", "કયાં", "સરનામું", "લોકેશન", "એડ્રેસ", "સ્થળ"]):
+        intents["location_request"] = True
+    
+    if any(word in message_lower for word in ["brochure", "details", "information", "બ્રોશર", "વિગત", "માહિતી", "ડિટેલ્સ"]):
+        intents["brochure_request"] = True
+    
+    if any(word in message_lower for word in ["price", "cost", "budget", "rate", "કિંમત", "ભાવ", "દર", "રેટ"]):
+        intents["pricing_inquiry"] = True
+    
+    if any(word in message_lower for word in ["amenities", "facilities", "gym", "pool", "સુવિધા", "સુવિધાઓ", "જીમ", "પૂલ"]):
+        intents["amenities_inquiry"] = True
+    
+    if any(word in message_lower for word in ["visit", "see", "tour", "show", "મુલાકાત", "જોવા", "દેખાડો", "બતાવો"]):
+        intents["visit_request"] = True
+    
+    if any(word in message_lower for word in ["yes", "okay", "sure", "good", "હા", "જોઈએ", "બરાબર", "સારું"]):
+        intents["positive_response"] = True
+    
+    if any(word in message_lower for word in ["no", "not", "later", "ના", "નહીં", "પછી"]):
+        intents["negative_response"] = True
+    
+    if any(word in message_lower for word in ["3bhk", "4bhk", "bedroom", "bhk", "બેડરૂમ"]):
+        intents["specific_unit_inquiry"] = True
+    
+    # If no specific intent detected, it's a general inquiry
+    if not any(intents.values()):
+        intents["general_inquiry"] = True
+    
+    # Update user profile based on intents
+    for intent, detected in intents.items():
+        if detected:
+            state["user_profile"]["interests"].add(intent)
+    
+    return intents
+
+def update_conversation_context(state, user_message, bot_response, intents):
+    """Update conversation context and flow"""
+    # Update conversation flow
+    flow_entry = {
+        "user_message": user_message,
+        "intents": [k for k, v in intents.items() if v],
+        "bot_response": bot_response[:100] + "..." if len(bot_response) > 100 else bot_response
+    }
+    state["conversation_flow"].append(flow_entry)
+    
+    # Keep only last 5 exchanges to manage memory
+    if len(state["conversation_flow"]) > 5:
+        state["conversation_flow"] = state["conversation_flow"][-5:]
+    
+    # Update conversation context summary
+    primary_intents = [k for k, v in intents.items() if v]
+    if primary_intents:
+        state["conversation_context"] = f"User is interested in: {', '.join(primary_intents)}. Last discussed: {primary_intents[0]}"
+    
+    # Update user stage based on behavior
+    interests_count = len(state["user_profile"]["interests"])
+    if interests_count >= 3:
+        state["user_profile"]["stage"] = "serious"
+    elif interests_count >= 1:
+        state["user_profile"]["stage"] = "interested"
+    
+    if "visit_request" in state["user_profile"]["interests"]:
+        state["user_profile"]["stage"] = "ready_to_visit"
+
+def build_conversation_memory(state):
+    """Build a smart conversation memory summary"""
+    if not state["conversation_flow"]:
+        return "First conversation with user."
+    
+    # Get recent conversation flow
+    recent_flow = state["conversation_flow"][-3:]  # Last 3 exchanges
+    memory_parts = []
+    
+    # Add conversation stage context
+    stage = state["user_profile"]["stage"]
+    stage_context = {
+        "initial": "User is just starting to explore",
+        "interested": "User has shown interest in specific aspects",
+        "serious": "User is seriously considering the property",
+        "ready_to_visit": "User is ready for a site visit"
+    }
+    memory_parts.append(f"User Stage: {stage_context.get(stage, stage)}")
+    
+    # Add recent conversation topics
+    if state["conversation_context"]:
+        memory_parts.append(f"Current Context: {state['conversation_context']}")
+    
+    # Add last bot question if there was one
+    if state["last_bot_question"]:
+        memory_parts.append(f"Last Question Asked: {state['last_bot_question']}")
+    
+    # Add interest summary
+    interests = list(state["user_profile"]["interests"])
+    if interests:
+        memory_parts.append(f"User has shown interest in: {', '.join(interests)}")
+    
+    return " | ".join(memory_parts)
+
+def build_smart_system_prompt(state, context, search_query, conversation_memory, intents):
+    """Build an intelligent system prompt based on conversation state"""
+    
+    # Language specific instructions
+    language_instruction = ""
+    if state["language"] == "gujarati":
+        language_instruction = """
+LANGUAGE: User is asking in Gujarati. Respond in ENGLISH first (keep it concise), it will be translated automatically.
+"""
+    
+    # Intent-specific handling
+    intent_handling = ""
+    active_intents = [k for k, v in intents.items() if v]
+    
+    if "location_request" in active_intents:
+        intent_handling += "\n🎯 USER WANTS LOCATION: Include 'SEND_LOCATION_NOW' in your response and provide address details."
+    
+    if "brochure_request" in active_intents:
+        intent_handling += "\n🎯 USER WANTS BROCHURE: Include 'SEND_BROCHURE_NOW' in your response and mention brochure details."
+    
+    if "positive_response" in active_intents and state["last_bot_question"]:
+        intent_handling += f"\n🎯 USER RESPONDED POSITIVELY to your question: '{state['last_bot_question']}' - Continue naturally based on what they agreed to."
+    
+    if "visit_request" in active_intents:
+        intent_handling += "\n🎯 USER WANTS TO VISIT: Provide contact details for booking - Mr. Nilesh at 7600612701."
+    
+    if "pricing_inquiry" in active_intents:
+        intent_handling += "\n🎯 USER ASKING ABOUT PRICING: Direct them to agents at 8238477697 or 9974812701 for latest rates."
+    
+    # Conversation stage specific guidance
+    stage_guidance = ""
+    user_stage = state["user_profile"]["stage"]
+    
+    if user_stage == "initial":
+        stage_guidance = "\n📋 APPROACH: Be welcoming and introduce key features. Ask about their preferences."
+    elif user_stage == "interested": 
+        stage_guidance = "\n📋 APPROACH: Build on their interest. Provide specific details they're looking for."
+    elif user_stage == "serious":
+        stage_guidance = "\n📋 APPROACH: User is seriously interested. Focus on convincing and moving towards visit."
+    elif user_stage == "ready_to_visit":
+        stage_guidance = "\n📋 APPROACH: User is ready to visit. Facilitate the visit booking and maintain excitement."
+    
+    return f"""You are a friendly, professional real estate assistant for Brookstone - a luxury residential project.
+
+CONVERSATION MEMORY: {conversation_memory}
+
+{language_instruction}
+
+CORE PRINCIPLES:
+- Be conversational and natural
+- Keep responses concise (2-3 sentences max)
+- Always mention "Brookstone offers luxurious 3&4BHK flats" when discussing units
+- Use 2-3 relevant emojis per response
+- Ask ONE follow-up question to continue conversation
+- Be convincing but not pushy
+
+{intent_handling}
+
+{stage_guidance}
+
+SPECIAL ACTIONS:
+- Include "SEND_LOCATION_NOW" when user asks for location/address
+- Include "SEND_BROCHURE_NOW" when user asks for brochure/details
+- These triggers will automatically send the actual location/brochure
+
+STANDARD INFORMATION:
+- Office Hours: 10:30 AM to 7:00 PM daily
+- Site Visit Booking: Mr. Nilesh at 7600612701
+- General Queries: 8238477697 or 9974812701
+
+KNOWLEDGE BASE:
+{context}
+
+USER QUERY: {search_query}
+
+Provide a natural, contextual response that continues the conversation flow:"""
+
+# ================================================
 # WHATSAPP FUNCTIONS
 # ================================================
 def send_whatsapp_text(to_phone, message):
@@ -436,110 +667,112 @@ def mark_message_as_read(message_id):
         logging.error(f"Error marking message as read: {e}")
 
 # ================================================
-# MESSAGE PROCESSING WITH LANGCHAIN MEMORY
+# MESSAGE PROCESSING
 # ================================================
 def process_incoming_message(from_phone, message_text, message_id):
-    # Get or create LangChain memory and user profile
-    memory, user_profile = get_or_create_memory(from_phone)
+    ensure_conversation_state(from_phone)
+    state = CONV_STATE[from_phone]
     
     # Detect language
-    gujarati_chars = any("\u0A80" <= c <= "\u0AFF" for c in message_text)
-    user_profile["language"] = "gujarati" if gujarati_chars else "english"
-    
-    # Handle first interaction
-    if user_profile.get("first_interaction", True):
-        user_profile["first_interaction"] = False
-        welcome_text = "Hello! Welcome to Brookstone 🏠✨ How can I assist you with our luxurious 3&4BHK flats today?"
-        
-        if user_profile["language"] == "gujarati":
+    guj = any("\u0A80" <= c <= "\u0AFF" for c in message_text)
+    state["language"] = "gujarati" if guj else "english"
+    state["chat_history"].append({"role": "user", "content": message_text})
+
+    # Check if this is the first message and send welcome
+    if state.get("is_first_message", True):
+        state["is_first_message"] = False
+        welcome_text = "Hello! Welcome to Brookstone. How could I assist you today? 🏠✨"
+        if state["language"] == "gujarati":
             welcome_text = translate_english_to_gujarati(welcome_text)
-        
         send_whatsapp_text(from_phone, welcome_text)
-        # Add welcome to memory
-        memory.save_context({"input": message_text}, {"output": welcome_text})
         return
 
-    # Analyze user intent
-    detected_intents = analyze_user_intent(message_text, user_profile)
+    # Analyze conversation intent for better context understanding
+    intents = analyze_conversation_intent(message_text, state)
     
-    logging.info(f"📱 Processing: {from_phone} | Message: {message_text} | Language: {user_profile['language']} | Intents: {detected_intents} | Stage: {user_profile['stage']}")
+    logging.info(f"📱 Processing message from {from_phone}: {message_text} [Language: {state['language']}] [Intents: {[k for k,v in intents.items() if v]}] [Stage: {state['user_profile']['stage']}]")
 
     if not retriever:
-        error_text = "I'm experiencing technical difficulties. Please contact our team at 8238477697 or 9974812701."
-        if user_profile["language"] == "gujarati":
+        error_text = "Please contact our agents at 8238477697 or 9974812701 for more info."
+        if state["language"] == "gujarati":
             error_text = translate_english_to_gujarati(error_text)
         send_whatsapp_text(from_phone, error_text)
         return
 
     try:
-        # Translate Gujarati to English for Pinecone search
+        # Translate Gujarati query to English for Pinecone search
         search_query = message_text
-        if user_profile["language"] == "gujarati":
+        if state["language"] == "gujarati":
             search_query = translate_gujarati_to_english(message_text)
             logging.info(f"🔄 Translated query: {search_query}")
 
-        # Retrieve relevant context from Pinecone
+        # Retrieve relevant documents
         docs = retriever.invoke(search_query)
-        logging.info(f"📚 Retrieved {len(docs)} documents")
+        logging.info(f"📚 Retrieved {len(docs)} relevant documents")
 
-        # Build context from retrieved documents
-        context = "\n\n".join([
-            (d.page_content or "") + ("\n" + "\n".join(f"{k}: {v}" for k, v in (d.metadata or {}).items()))
-            for d in docs
-        ])
-
-        # Build dynamic context variables
-        context_vars = build_context_variables(user_profile, detected_intents, context)
-        
-        # Create conversation chain with dynamic prompt
-        prompt_template = create_dynamic_prompt_template()
-        conversation_chain = ConversationChain(
-            llm=llm,
-            prompt=prompt_template,
-            memory=memory,
-            verbose=False
+        context = "\n\n".join(
+            [(d.page_content or "") + ("\n" + "\n".join(f"{k}: {v}" for k, v in (d.metadata or {}).items())) for d in docs]
         )
 
-        # Get response from LangChain conversation chain
-        response = conversation_chain.predict(
-            input=message_text,
-            **context_vars
-        )
+        # Build conversation memory for better context
+        conversation_memory = build_conversation_memory(state)
         
+        # Build smart system prompt based on conversation state
+        system_prompt = build_smart_system_prompt(state, context, search_query, conversation_memory, intents)
+
+        # Get LLM response
+        response = llm.invoke(system_prompt).content.strip()
         logging.info(f"🧠 LLM Response: {response}")
 
-        # Translate response if needed
+        # Translate response to Gujarati if needed
         final_response = response
-        if user_profile["language"] == "gujarati":
+        if state["language"] == "gujarati":
             final_response = translate_english_to_gujarati(response)
             logging.info(f"🔄 Translated response: {final_response}")
 
-        # Clean response from action triggers
+        # Remove action triggers from response before sending to user
         clean_response = final_response.replace("SEND_LOCATION_NOW", "").replace("SEND_BROCHURE_NOW", "").strip()
         
-        # Send main response
+        # Send text response
         send_whatsapp_text(from_phone, clean_response)
 
-        # Handle automatic actions based on triggers or intents
-        if "SEND_LOCATION_NOW" in response or "location_request" in detected_intents:
+        # Handle automatic actions based on intents or LLM triggers
+        if "SEND_LOCATION_NOW" in response or intents.get("location_request", False):
             send_whatsapp_location(from_phone)
-            user_profile["location_sent"] = True
-            logging.info(f"📍 Location sent to {from_phone}")
+            logging.info(f"📍 Location sent to {from_phone} - Intent: {intents.get('location_request', False)}, LLM: {'SEND_LOCATION_NOW' in response}")
             
-        if "SEND_BROCHURE_NOW" in response or "brochure_request" in detected_intents:
+        if "SEND_BROCHURE_NOW" in response or intents.get("brochure_request", False):
             send_whatsapp_document(from_phone)
-            user_profile["brochure_sent"] = True
-            logging.info(f"📄 Brochure sent to {from_phone}")
+            logging.info(f"📄 Brochure sent to {from_phone} - Intent: {intents.get('brochure_request', False)}, LLM: {'SEND_BROCHURE_NOW' in response}")
 
-        logging.info(f"✅ Conversation processed successfully for {from_phone}")
+        # Extract and store the follow-up question for memory
+        sentences = clean_response.split('.')
+        follow_up_question = None
+        for sentence in sentences:
+            if '?' in sentence:
+                follow_up_question = sentence.strip()
+                break
+        
+        if follow_up_question:
+            state["last_bot_question"] = follow_up_question
+            logging.info(f"🧠 Stored follow-up question: {follow_up_question}")
+
+        # Update conversation context and memory
+        update_conversation_context(state, message_text, clean_response, intents)
+        
+        # Add to chat history
+        state["chat_history"].append({"role": "assistant", "content": clean_response})
+
+        # Keep chat history manageable (last 10 messages)
+        if len(state["chat_history"]) > 10:
+            state["chat_history"] = state["chat_history"][-10:]
 
     except Exception as e:
-        logging.error(f"❌ Error processing message: {e}")
-        error_text = "I encountered an issue. Please contact our team at 8238477697 or 9974812701."
-        if user_profile["language"] == "gujarati":
+        logging.error(f"❌ Error in RAG processing: {e}")
+        error_text = "Sorry, I'm facing a technical issue. Please contact 8238477697 / 9974812701."
+        if state["language"] == "gujarati":
             error_text = translate_english_to_gujarati(error_text)
         send_whatsapp_text(from_phone, error_text)
-
 # ================================================
 # WEBHOOK ROUTES
 # ================================================
@@ -606,9 +839,7 @@ def health():
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "message": "Brookstone WhatsApp RAG Bot with LangChain Memory is running! 🚀",
-        "memory_type": "ConversationSummaryBufferMemory",
-        "features": ["Dynamic intent detection", "User profiling", "Conversation context", "Auto-translation"],
+        "message": "Brookstone WhatsApp RAG Bot is running!",
         "brochure_url": BROCHURE_URL,
         "endpoints": {"webhook": "/webhook", "health": "/health"}
     }), 200
@@ -618,5 +849,5 @@ def home():
 # ================================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    logging.info(f"🚀 Starting Brookstone WhatsApp Bot with LangChain Memory on port {port}")
+    logging.info(f"🚀 Starting Brookstone WhatsApp Bot on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
