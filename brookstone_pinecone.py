@@ -200,22 +200,10 @@ def load_vectorstore() -> LangchainPinecone:
     """Initialize Pinecone vector store."""
     embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
     
-    # Initialize Pinecone with backward compatible approach
-    try:
-        # Try newer pinecone-client package
-        import pinecone
-        pinecone.init(api_key=PINECONE_API_KEY, environment="us-west1-gcp")
-        index = pinecone.Index(INDEX_NAME)
-    except Exception as e:
-        logger.error(f"Failed with pinecone-client: {e}")
-        try:
-            # Try newer pinecone package API
-            from pinecone import Pinecone as PineconeClient
-            pc = PineconeClient(api_key=PINECONE_API_KEY)
-            index = pc.Index(INDEX_NAME)
-        except Exception as e2:
-            logger.error(f"Failed with pinecone package: {e2}")
-            raise e2
+    # Use modern Pinecone client
+    from pinecone import Pinecone as PineconeClient
+    pc = PineconeClient(api_key=PINECONE_API_KEY)
+    index = pc.Index(INDEX_NAME)
     
     # Use LangChain's Pinecone vectorstore
     return LangchainPinecone(index, embeddings, text_key="text")
