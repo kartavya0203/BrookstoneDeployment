@@ -184,7 +184,7 @@ def load_vectorstore():
 try:
     vectorstore = load_vectorstore()
     if vectorstore:
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 100})
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
         logging.info("✅ Pinecone vectorstore with OpenAI embeddings loaded successfully")
     else:
         retriever = None
