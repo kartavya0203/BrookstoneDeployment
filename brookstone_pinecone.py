@@ -145,11 +145,11 @@ else:
     try:
         # Configure Gemini
         genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+        gemini_model = genai.GenerativeModel('gemini-1.5-flash')
         
         # Initialize Gemini chat for LangChain
         gemini_chat = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-1.5-flash",
             google_api_key=GEMINI_API_KEY,
             temperature=0
         )
