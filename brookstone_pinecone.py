@@ -134,13 +134,13 @@ except Exception as e:
 if not GEMINI_API_KEY or not PINECONE_API_KEY or not OPENAI_API_KEY:
     logging.error("❌ Missing API keys! Need GEMINI_API_KEY, PINECONE_API_KEY, and OPENAI_API_KEY")
 
-# Initialize Gemini for chat and translations, OpenAI for Pinecone embeddings
+# Initialize Gemini for chat, translations, and Pinecone embeddings
 gemini_model = None
 gemini_chat = None
-openai_embeddings = None
+gemini_embeddings = None
 
 if not GEMINI_API_KEY:
-    logging.error("❌ Missing Gemini API key! Chat and translation features will not work.")
+    logging.error("❌ Missing Gemini API key! Chat, translation, and search features will not work.")
 else:
     try:
         # Configure Gemini
@@ -154,22 +154,28 @@ else:
             temperature=0
         )
         
-        logging.info("✅ Gemini API configured for chat and translations")
+        # Initialize Gemini embeddings for Pinecone (768 dimensions)
+        gemini_embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/text-embedding-004",
+            google_api_key=GEMINI_API_KEY
+        )
+        
+        logging.info("✅ Gemini API configured for chat, translations, and embeddings")
     except Exception as e:
         logging.error(f"❌ Error initializing Gemini: {e}")
         gemini_model = None
         gemini_chat = None
+        gemini_embeddings = None
 
-# Initialize OpenAI embeddings for Pinecone (to work with existing data)
-if not OPENAI_API_KEY:
-    logging.error("❌ Missing OpenAI API key! Pinecone search will not work.")
-else:
+# Keep OpenAI as fallback if needed
+openai_embeddings = None
+if OPENAI_API_KEY:
     try:
         openai_embeddings = OpenAIEmbeddings(
             model="text-embedding-3-large",
             openai_api_key=OPENAI_API_KEY
         )
-        logging.info("✅ OpenAI embeddings configured for Pinecone search")
+        logging.info("✅ OpenAI embeddings available as fallback")
     except Exception as e:
         logging.error(f"❌ Error initializing OpenAI embeddings: {e}")
         openai_embeddings = None
@@ -177,19 +183,23 @@ else:
 # ================================================
 # PINECONE SETUP
 # ================================================
-INDEX_NAME = "brookstone-faq-json"
+INDEX_NAME = "brookstone-index"
 
 def load_vectorstore():
-    if not openai_embeddings:
-        logging.error("❌ OpenAI embeddings not available for Pinecone")
+    if not gemini_embeddings:
+        logging.error("❌ Gemini embeddings not available for Pinecone")
+        # Try fallback to OpenAI if available
+        if openai_embeddings:
+            logging.warning("⚠️ Using OpenAI embeddings as fallback - may have dimension mismatch")
+            return PineconeVectorStore(index_name=INDEX_NAME, embedding=openai_embeddings)
         return None
-    return PineconeVectorStore(index_name=INDEX_NAME, embedding=openai_embeddings)
+    return PineconeVectorStore(index_name=INDEX_NAME, embedding=gemini_embeddings)
 
 try:
     vectorstore = load_vectorstore()
     if vectorstore:
         retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-        logging.info("✅ Pinecone vectorstore with OpenAI embeddings loaded successfully")
+        logging.info("✅ Pinecone vectorstore with Gemini embeddings loaded successfully")
     else:
         retriever = None
         logging.error("❌ Failed to load vectorstore")
@@ -761,11 +771,16 @@ def process_incoming_message(from_phone, message_text, message_id):
         return
 
     try:
-        # Translate Gujarati query to English for Pinecone search
+        # Use original query for Pinecone search since we're using Gemini embeddings
+        # Gemini embeddings can handle multilingual queries directly
         search_query = message_text
+        
+        # Optional: Still translate Gujarati to English for better semantic understanding
+        # but use original query for embedding search
+        translated_query = message_text
         if state["language"] == "gujarati":
-            search_query = translate_gujarati_to_english(message_text)
-            logging.info(f"🔄 Translated query: {search_query}")
+            translated_query = translate_gujarati_to_english(message_text)
+            logging.info(f"🔄 Translated query for context: {translated_query}")
 
         docs = retriever.invoke(search_query)
         logging.info(f"📚 Retrieved {len(docs)} relevant documents")
@@ -904,7 +919,7 @@ Remember: Keep responses EXTREMELY brief - maximum 1-2 sentences!
 Available Knowledge Context:
 {context}
 
-User Question: {search_query}
+User Question: {translated_query if state["language"] == "gujarati" else search_query}
 
 IMPORTANT: Be natural and contextual. Don't force "Brookstone offers luxurious 3&4BHK flats" into every response. Only mention flat types when the user specifically asks about configurations, availability, or what types of units you have.
 
@@ -1056,9 +1071,11 @@ def health():
         "status": "healthy",
         "whatsapp_configured": bool(WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID),
         "gemini_configured": bool(GEMINI_API_KEY and gemini_model and gemini_chat),
-        "pinecone_configured": bool(PINECONE_API_KEY and openai_embeddings),
+        "gemini_embeddings_configured": bool(gemini_embeddings),
+        "pinecone_configured": bool(PINECONE_API_KEY and gemini_embeddings),
+        "openai_fallback_available": bool(openai_embeddings),
         "workveu_configured": bool(WORKVEU_WEBHOOK_URL and WORKVEU_API_KEY),
-        "hybrid_mode": "Gemini for chat, OpenAI for search"
+        "mode": "Full Gemini integration with Gemini embeddings for Pinecone"
     }), 200
 
 @app.route("/", methods=["GET"])

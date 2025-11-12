@@ -177,7 +177,7 @@ else:
 # ================================================
 # PINECONE SETUP
 # ================================================
-INDEX_NAME = "brookstone-faq-json"
+INDEX_NAME = "brookstone-index"
 
 def load_vectorstore():
     if not openai_embeddings:
@@ -379,20 +379,39 @@ def detect_location_request_with_gemini(message_text):
         if not gemini_model:
             return False
         
+        # First check if message contains property inquiry keywords - if yes, don't treat as location request
+        property_inquiry_keywords = [
+            "bhk", "flat", "apartment", "house", "home", "property", "unit", 
+            "bedroom", "price", "cost", "rate", "booking", "buy", "purchase",
+            "interested", "looking", "want", "need", "show", "see", "visit",
+            "ફ્લેટ", "ઘર", "પ્રોપર્ટી", "બેડરૂમ", "કિંમત", "દર", "ખરીદી", "જોઈએ", "શોધી"
+        ]
+        
+        message_lower = message_text.lower()
+        if any(keyword in message_lower for keyword in property_inquiry_keywords):
+            logging.info(f"🏠 Property inquiry detected, not treating as location request: '{message_text[:30]}...'")
+            return False
+        
         location_detection_prompt = f"""
-Analyze this message and determine if the user is asking for location, address, or directions to a property/site.
+Analyze this message and determine if the user is SPECIFICALLY asking for location, address, or directions to a property/site.
 
 User Message: "{message_text}"
 
-Consider these as location requests:
-- Asking for address, location, directions
-- "Where is it located?"
-- "Can you share the location?"
-- "What's the address?"
-- "How to reach there?"
-- Similar location-related queries in any language
+ONLY consider these as location requests:
+- Direct requests for address, location, directions, map
+- "Where is it located?" / "કયાં સ્થિત છે?"
+- "Can you share the location?" / "લોકેશન શેર કરો"
+- "What's the address?" / "સરનામું શું છે?"
+- "How to reach there?" / "ત્યાં કેવી રીતે પહોંચવું?"
+- "Send location" / "લોકેશન મોકલો"
 
-Respond with only "YES" if it's a location request, or "NO" if it's not.
+DO NOT consider these as location requests:
+- General property inquiries about flats/apartments
+- Questions about prices, features, amenities
+- Interest in visiting or seeing properties
+- Questions about availability or types of units
+
+Respond with only "YES" if it's a SPECIFIC location/address request, or "NO" if it's any other type of inquiry.
         """
         
         response = gemini_model.generate_content(location_detection_prompt)
@@ -798,12 +817,12 @@ You are a friendly real estate assistant for Brookstone project. Be conversation
 {language_instruction}
 
 CORE INSTRUCTIONS:
-- Be VERY CONCISE - give brief, direct answers (2-3 sentences max)
+- Be EXTREMELY CONCISE - Maximum 1-2 sentences for initial response
 - Answer using context below when available
-- Use 2-3 relevant emojis to make responses engaging
-- Keep responses WhatsApp-friendly
+- Use 2-3 relevant emojis only
+- Keep responses WhatsApp-friendly and brief
 - Do NOT invent details
-- Remember conversation flow and previous follow-ups
+- Do NOT give long explanations unless specifically asked
 - ALWAYS try to convince user in a friendly way
 - Use the conversation memory and user preferences provided
 - Be NATURAL and CONTEXTUAL - don't repeat the same phrases in every response
@@ -817,9 +836,15 @@ SMART FLAT MENTIONS:
   * "What do you have?" / "What's available?"
   * Property types or unit options
   * First-time inquiries about the project
-- Whether user asks about 3BHK or whether user asks about 4BHK, mention both types "We have luxurious 3&4BHK flats available to Brookstone!"
+- Whether user asks about 3BHK or whether user asks about 4BHK, mention both types "We have luxurious 3&4BHK flats available at Brookstone!"
 - Do NOT force this phrase into every response - be natural and contextual
 - For queries about amenities, location, pricing, etc. - just answer directly without mentioning flat types
+
+RESPONSE LENGTH RULES:
+- For flat availability questions: "Yes! We have luxury 3&4BHK flats available 🏠 Interested in details? ✨"
+- For general questions: Keep to 1 short sentence + 1 follow-up question
+- NO detailed explanations unless specifically asked for details
+- NO long paragraphs or multiple sentences
 
 BROCHURE STRATEGY:
 - ACTIVELY offer brochure when user shows interest in details, layout, floor plans, specifications, amenities
@@ -868,12 +893,12 @@ CONVERSATION FLOW:
 - Always sound excited about Brookstone!
 
 Example Responses (be contextual, not repetitive):
-- When user asks about flat types: "Yes! Brookstone offers luxurious 3&4BHK flats 🏠✨ Which one interests you more? 🌟"
-- When user asks about amenities: "We have amazing amenities including [specific amenities] 💎 Would you like to know more details? 📐"
-- When user asks about location: "Great location with excellent connectivity! 🗺️ Any other questions about the project? ✨"
-- When user asks about pricing: "Let me connect you with our pricing team � Meanwhile, interested in seeing our floor plans? 📄"
+- When user asks about flat types: "Yes! We have luxury 3&4BHK flats 🏠 Which interests you more? ✨"
+- When user asks about amenities: "Amazing amenities available! 💎 Want the brochure? �"
+- When user asks about location: "Great location with excellent connectivity! 🗺️ Want to visit? 📞"
+- When user asks about pricing: "Please contact 8238477697 for pricing 📞 Interested in floor plans? 📄"
 
-Remember: Only mention 3&4BHK when it's actually relevant to the user's question!
+Remember: Keep responses EXTREMELY brief - maximum 1-2 sentences!
 
 ---
 Available Knowledge Context:
@@ -883,7 +908,7 @@ User Question: {search_query}
 
 IMPORTANT: Be natural and contextual. Don't force "Brookstone offers luxurious 3&4BHK flats" into every response. Only mention flat types when the user specifically asks about configurations, availability, or what types of units you have.
 
-Provide a brief, convincing answer with good emojis and ask ONE relevant follow-up question.
+KEEP RESPONSES VERY SHORT - Maximum 1-2 sentences + 1 simple follow-up question.
 Assistant:
         """.strip()
 
