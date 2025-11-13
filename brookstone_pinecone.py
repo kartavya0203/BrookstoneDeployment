@@ -5,12 +5,11 @@ from flask import Flask, request, jsonify
 import requests
 from dotenv import load_dotenv
 from langchain_pinecone import PineconeVectorStore
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.embeddings import OllamaEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_community.embeddings import OpenAIEmbeddings
 import json
 from datetime import datetime, timedelta
 import google.generativeai as genai
-from pinecone import Pinecone
 
 load_dotenv()
 
@@ -24,6 +23,7 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "brookstone_verify_token_2024")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Keep for Pinecone embeddings
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 BROCHURE_URL = os.getenv("BROCHURE_URL", "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/BROOKSTONE.pdf")
 
@@ -131,12 +131,13 @@ try:
 except Exception as e:
     logging.error(f"❌ Error initializing media: {e}")
 
-if not GEMINI_API_KEY or not PINECONE_API_KEY:
-    logging.error("❌ Missing API keys! Need GEMINI_API_KEY and PINECONE_API_KEY")
+if not GEMINI_API_KEY or not PINECONE_API_KEY or not OPENAI_API_KEY:
+    logging.error("❌ Missing API keys! Need GEMINI_API_KEY, PINECONE_API_KEY, and OPENAI_API_KEY")
 
-# Initialize Gemini for chat and translations
+# Initialize Gemini for chat and translations, OpenAI for Pinecone embeddings
 gemini_model = None
 gemini_chat = None
+openai_embeddings = None
 
 if not GEMINI_API_KEY:
     logging.error("❌ Missing Gemini API key! Chat and translation features will not work.")
@@ -159,130 +160,41 @@ else:
         gemini_model = None
         gemini_chat = None
 
+# Initialize OpenAI embeddings for Pinecone (to work with existing data)
+if not OPENAI_API_KEY:
+    logging.error("❌ Missing OpenAI API key! Pinecone search will not work.")
+else:
+    try:
+        openai_embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-large",
+            openai_api_key=OPENAI_API_KEY
+        )
+        logging.info("✅ OpenAI embeddings configured for Pinecone search")
+    except Exception as e:
+        logging.error(f"❌ Error initializing OpenAI embeddings: {e}")
+        openai_embeddings = None
+
 # ================================================
-# OLLAMA + PINECONE RETRIEVAL SETUP (REPLACES OpenAI embeddings)
+# PINECONE SETUP
 # ================================================
-INDEX_NAME = "brookstone-faq"
-
-try:
-    ollama_embeddings = OllamaEmbeddings(model="nomic-embed-text")
-    logging.info("✅ Ollama nomic-text-embedding configured successfully")
-except Exception as e:
-    logging.error(f"❌ Error initializing Ollama embeddings: {e}")
-    ollama_embeddings = None
-
-# Create Pinecone client using new SDK
-pc = None
-try:
-    pc = Pinecone(api_key=PINECONE_API_KEY)
-    logging.info("✅ Pinecone client created successfully")
-except Exception as e:
-    logging.error(f"❌ Failed to create Pinecone client: {e}")
-    pc = None
-
-# Helper wrapper so existing code calling retriever.invoke(query) still works
-class RetrieverWrapper:
-    def __init__(self, inner):
-        self.inner = inner
-
-    def invoke(self, query):
-        # Try common methods in order
-        try:
-            # some retrievers (custom) may implement invoke directly
-            return self.inner.invoke(query)
-        except Exception:
-            pass
-        try:
-            # LangChain retriever: get_relevant_documents
-            return self.inner.get_relevant_documents(query)
-        except Exception:
-            pass
-        try:
-            # Alternative: retrieve
-            return self.inner.retrieve(query)
-        except Exception as e:
-            logging.error(f"❌ Retriever invocation failed: {e}")
-            return []
+INDEX_NAME = "brookstone-faq-json"
 
 def load_vectorstore():
-    """
-    Connect to your existing Pinecone index using the new Pinecone client and Ollama embeddings.
-    Returns a vectorstore compatible object.
-    """
-    if not ollama_embeddings:
-        logging.error("❌ Ollama embeddings not available for Pinecone retrieval")
+    if not openai_embeddings:
+        logging.error("❌ OpenAI embeddings not available for Pinecone")
         return None
-    if not pc:
-        logging.error("❌ Pinecone client not initialized")
-        return None
-
-    try:
-        # check available indexes
-        try:
-            indexes_info = pc.list_indexes()
-            indexes = [idx["name"] if isinstance(idx, dict) and "name" in idx else idx for idx in indexes_info]
-        except Exception:
-            # Some SDK versions return flat list of names
-            try:
-                indexes = pc.list_indexes()
-            except Exception as e:
-                logging.warning(f"⚠️ Could not list indexes: {e}")
-                indexes = []
-
-        if INDEX_NAME not in indexes:
-            logging.error(f"❌ Index '{INDEX_NAME}' not found in Pinecone. Available: {indexes}")
-            # still attempt to create a client Index handle; this may still work depending on SDK
-            try:
-                index_handle = pc.Index(INDEX_NAME)
-            except Exception as e:
-                logging.error(f"❌ Could not create index handle: {e}")
-                return None
-        else:
-            index_handle = pc.Index(INDEX_NAME)
-
-        # Try to create LangChain-compatible PineconeVectorStore
-        try:
-            # The PineconeVectorStore wrapper here expects either index_name or index handle depending on implementation.
-            # First try passing the index handle
-            vectorstore = PineconeVectorStore(index=index_handle, embedding=ollama_embeddings)
-            logging.info(f"✅ Loaded Pinecone index '{INDEX_NAME}' with PineconeVectorStore (index handle)")
-            return vectorstore
-        except TypeError:
-            # Fallback: try by index_name
-            try:
-                vectorstore = PineconeVectorStore(index_name=INDEX_NAME, embedding=ollama_embeddings)
-                logging.info(f"✅ Loaded Pinecone index '{INDEX_NAME}' with PineconeVectorStore (index_name fallback)")
-                return vectorstore
-            except Exception as e:
-                logging.warning(f"⚠️ PineconeVectorStore(index_name) fallback failed: {e}")
-
-        # As last resort, try to use LangChain's Pinecone wrapper if available
-        try:
-            from langchain.vectorstores import Pinecone as LangchainPinecone
-            vs = LangchainPinecone.from_existing_index(index_name=INDEX_NAME, embedding=ollama_embeddings, pinecone_client=pc)
-            logging.info(f"✅ Loaded Pinecone index '{INDEX_NAME}' with LangChain Pinecone wrapper")
-            return vs
-        except Exception as e:
-            logging.warning(f"⚠️ LangChain Pinecone.from_existing_index failed: {e}")
-
-        logging.error("❌ Could not load any Pinecone vectorstore wrapper")
-        return None
-
-    except Exception as e:
-        logging.error(f"❌ Error loading vectorstore: {e}")
-        return None
+    return PineconeVectorStore(index_name=INDEX_NAME, embedding=openai_embeddings)
 
 try:
     vectorstore = load_vectorstore()
     if vectorstore:
-        raw_retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-        retriever = RetrieverWrapper(raw_retriever)
-        logging.info("✅ Pinecone vectorstore with Ollama embeddings loaded successfully")
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+        logging.info("✅ Pinecone vectorstore with OpenAI embeddings loaded successfully")
     else:
         retriever = None
         logging.error("❌ Failed to load vectorstore")
 except Exception as e:
-    logging.error(f"❌ Error loading Pinecone vectorstore: {e}")
+    logging.error(f"❌ Error loading Pinecone: {e}")
     retriever = None
 
 # ================================================
@@ -342,6 +254,76 @@ Gujarati translation (keep it brief and concise):
     except Exception as e:
         logging.error(f"❌ Error translating English to Gujarati with Gemini: {e}")
         return text  # Return original text if translation fails
+
+# ================================================
+# AREA INFORMATION DATABASE
+# ================================================
+AREA_INFO = {
+    "3bhk": {
+        "super_buildup": "2650 sqft",
+        "display_name": "3BHK"
+    },
+    "4bhk": {
+        "super_buildup": "3850 sqft", 
+        "display_name": "4BHK"
+    },
+    "3bhk_tower_duplex": {
+        "super_buildup": "5300 sqft + 700 sqft carpet terrace",
+        "display_name": "3BHK Tower Duplex"
+    },
+    "4bhk_tower_duplex": {
+        "super_buildup": "7700 sqft + 1000 sqft carpet terrace",
+        "display_name": "4BHK Tower Duplex" 
+    },
+    "3bhk_tower_simplex": {
+        "super_buildup": "2650 sqft + 700 sqft carpet terrace",
+        "display_name": "3BHK Tower Simplex"
+    },
+    "4bhk_tower_simplex": {
+        "super_buildup": "3850 sqft + 1000 sqft carpet terrace", 
+        "display_name": "4BHK Tower Simplex"
+    }
+}
+
+def get_area_information(query):
+    """Get area information from hardcoded database"""
+    query_lower = query.lower()
+    results = []
+    
+    # Check for specific unit types
+    if "tower duplex" in query_lower:
+        if "3bhk" in query_lower or "3 bhk" in query_lower:
+            results.append(f"{AREA_INFO['3bhk_tower_duplex']['display_name']}: {AREA_INFO['3bhk_tower_duplex']['super_buildup']}")
+        elif "4bhk" in query_lower or "4 bhk" in query_lower:
+            results.append(f"{AREA_INFO['4bhk_tower_duplex']['display_name']}: {AREA_INFO['4bhk_tower_duplex']['super_buildup']}")
+        else:
+            # If tower duplex mentioned but no specific BHK, show both tower duplex units
+            results.append(f"{AREA_INFO['3bhk_tower_duplex']['display_name']}: {AREA_INFO['3bhk_tower_duplex']['super_buildup']}")
+            results.append(f"{AREA_INFO['4bhk_tower_duplex']['display_name']}: {AREA_INFO['4bhk_tower_duplex']['super_buildup']}")
+    elif "tower simplex" in query_lower:
+        if "3bhk" in query_lower or "3 bhk" in query_lower:
+            results.append(f"{AREA_INFO['3bhk_tower_simplex']['display_name']}: {AREA_INFO['3bhk_tower_simplex']['super_buildup']}")
+        elif "4bhk" in query_lower or "4 bhk" in query_lower:
+            results.append(f"{AREA_INFO['4bhk_tower_simplex']['display_name']}: {AREA_INFO['4bhk_tower_simplex']['super_buildup']}")
+        else:
+            # If tower simplex mentioned but no specific BHK, show both tower simplex units
+            results.append(f"{AREA_INFO['3bhk_tower_simplex']['display_name']}: {AREA_INFO['3bhk_tower_simplex']['super_buildup']}")
+            results.append(f"{AREA_INFO['4bhk_tower_simplex']['display_name']}: {AREA_INFO['4bhk_tower_simplex']['super_buildup']}")
+    else:
+        # Regular units - only add specific matches
+        if "3bhk" in query_lower or "3 bhk" in query_lower:
+            results.append(f"{AREA_INFO['3bhk']['display_name']}: {AREA_INFO['3bhk']['super_buildup']}")
+        if "4bhk" in query_lower or "4 bhk" in query_lower:
+            results.append(f"{AREA_INFO['4bhk']['display_name']}: {AREA_INFO['4bhk']['super_buildup']}")
+        
+        # Only return all regular units if query is very general (like "what are the sizes" or "area information")
+        if not results and any(general_term in query_lower for general_term in ["what are", "all", "available", "sizes", "options"]) and not any(specific in query_lower for specific in ["5bhk", "penthouse", "villa", "studio"]):
+            results = [
+                f"{AREA_INFO['3bhk']['display_name']}: {AREA_INFO['3bhk']['super_buildup']}",
+                f"{AREA_INFO['4bhk']['display_name']}: {AREA_INFO['4bhk']['super_buildup']}"
+            ]
+    
+    return results
 
 # ================================================
 # CONVERSATION STATE & CONTEXT ANALYSIS WITH GEMINI
@@ -542,7 +524,6 @@ Return only a comma-separated list of relevant categories. Example: "pricing, si
         logging.error(f"❌ Error in Gemini interest analysis: {e}")
         return analyze_user_interests(message_text, state)  # Fallback
 
-# (Note: analyze_user_interests defined twice in original; keep the second one for parity)
 def analyze_user_interests(message_text, state):
     """Analyze user message to understand their interests"""
     message_lower = message_text.lower()
@@ -683,7 +664,6 @@ def push_to_workveu(name, wa_id, message_text, direction="inbound"):
 
 # ================================================
 # MESSAGE PROCESSING
-# (This block preserved exactly from your original backup2.py)
 # ================================================
 def process_incoming_message(from_phone, message_text, message_id):
     ensure_conversation_state(from_phone)
@@ -857,8 +837,69 @@ def process_incoming_message(from_phone, message_text, message_id):
             search_query = translate_gujarati_to_english(message_text)
             logging.info(f"🔄 Translated query: {search_query}")
 
-        docs = retriever.invoke(search_query)
-        logging.info(f"📚 Retrieved {len(docs)} relevant documents")
+        # Area terminology mapping for search and response
+        area_response_mapping = {}
+        original_query = search_query
+        
+        # Check if user is asking about area-related queries
+        search_query_lower = search_query.lower()
+        
+        # Check if this is an area-related query that we have hardcoded information for
+        area_keywords = ["area", "sqft", "square feet", "size", "carpet", "super build", "buildup", "built-up", "sbu"]
+        is_area_query = any(keyword in search_query_lower for keyword in area_keywords)
+        
+        # Check for area terminology mapping first
+        area_response_mapping = {}
+        if any(term in search_query_lower for term in ["carpet area", "carpet"]):
+            area_response_mapping["user_term"] = "carpet area"
+            area_response_mapping["response_term"] = "Super Build-up area"
+            logging.info("🏠 User asked about carpet area - will respond with Super Build-up area")
+        elif any(term in search_query_lower for term in ["super build-up", "super buildup", "build-up", "buildup", "built-up", "sbu", "super build up", "build up"]):
+            # Extract the original term user used
+            original_term = "Super Build-up area"
+            if "sbu" in search_query_lower:
+                original_term = "SBU"
+            elif "build-up" in search_query_lower or "buildup" in search_query_lower or "built-up" in search_query_lower:
+                original_term = "Build-up area"
+            elif "super build" in search_query_lower:
+                original_term = "Super Build-up area"
+            
+            area_response_mapping["user_term"] = original_term.lower()
+            area_response_mapping["response_term"] = original_term
+            logging.info(f"🏠 User asked about {original_term}")
+        
+        # Try to get hardcoded information for area queries FIRST
+        hardcoded_area_info = []
+        use_hardcoded_only = False
+        
+        if is_area_query and area_response_mapping:
+            # For area-related queries, check hardcoded information first
+            hardcoded_area_info = get_area_information(search_query)
+            if hardcoded_area_info:
+                logging.info(f"🏠 Found hardcoded area information: {hardcoded_area_info}")
+                use_hardcoded_only = True
+                # Skip Pinecone search for area queries when hardcoded info is available
+                docs = []
+                context = ""
+            else:
+                logging.info(f"🏠 No hardcoded area info found, will search Pinecone")
+        
+        # If not using hardcoded info only, proceed with Pinecone search
+        if not use_hardcoded_only:
+            # Apply search term mapping for Pinecone search
+            if area_response_mapping:
+                if area_response_mapping["user_term"] == "carpet area":
+                    # Search for carpet area in Pinecone
+                    logging.info("🏠 Searching Pinecone for carpet area but will respond with Super Build-up area")
+                else:
+                    # Replace their term with "carpet area" for Pinecone search
+                    search_query = re.sub(r'\b(super build-?up|build-?up|built-?up|sbu)(\s+area)?\b', 'carpet area', search_query, flags=re.IGNORECASE)
+                    logging.info(f"🏠 Modified search query for Pinecone: {search_query}")
+            
+            docs = retriever.invoke(search_query)
+            logging.info(f"📚 Retrieved {len(docs)} relevant documents")
+        else:
+            docs = []
 
         context = "\n\n".join(
             [(d.page_content or "") + ("\n" + "\n".join(f"{k}: {v}" for k, v in (d.metadata or {}).items())) for d in docs]
@@ -896,6 +937,25 @@ def process_incoming_message(from_phone, message_text, message_id):
         if state.get("last_follow_up"):
             follow_up_memory = f"\nRECENT FOLLOW-UP: I recently asked '{state['last_follow_up']}' and user is now responding to that question."
         
+        # Area terminology instruction based on user query
+        area_terminology_instruction = ""
+        hardcoded_area_context = ""
+        
+        # Include hardcoded area information if available and this is an area query
+        if hardcoded_area_info and use_hardcoded_only:
+            hardcoded_area_context = f"\nHARDCODED AREA INFORMATION (USE THIS): {' | '.join(hardcoded_area_info)}"
+            area_terminology_instruction += f"\nIMPORTANT: Use ONLY the hardcoded area information provided above for area-related questions. This is the most accurate and up-to-date information. Do NOT search or use any other sources for area information."
+        elif hardcoded_area_info and not use_hardcoded_only:
+            # Hardcoded info available but also using Pinecone context
+            hardcoded_area_context = f"\nHARDCODED AREA INFORMATION: {' | '.join(hardcoded_area_info)}"
+            area_terminology_instruction += f"\nIMPORTANT: Prefer the hardcoded area information when available, but you can also use context information if needed."
+        
+        if area_response_mapping:
+            if area_response_mapping["user_term"] == "carpet area":
+                area_terminology_instruction += f"\nIMPORTANT AREA TERMINOLOGY: User asked about '{area_response_mapping['user_term']}' but you must respond using '{area_response_mapping['response_term']}' instead. Say something like 'The {area_response_mapping['response_term']} is...' or 'Our {area_response_mapping['response_term']} for...' - NEVER mention 'carpet area' in your response."
+            else:
+                area_terminology_instruction += f"\nIMPORTANT AREA TERMINOLOGY: User asked about '{area_response_mapping['response_term']}'. Use their exact term '{area_response_mapping['response_term']}' in your response - do NOT mention 'carpet area'."
+        
         # Determine language for system prompt
         language_instruction = ""
         if state["language"] == "gujarati":
@@ -905,6 +965,10 @@ def process_incoming_message(from_phone, message_text, message_id):
 You are a friendly real estate assistant for Brookstone project. Be conversational, natural, and convincing.
 
 {language_instruction}
+
+{area_terminology_instruction}
+
+{hardcoded_area_context}
 
 CORE INSTRUCTIONS:
 - Be EXTREMELY CONCISE - Maximum 1-2 sentences for initial response
@@ -937,11 +1001,11 @@ RESPONSE LENGTH RULES:
 - NO long paragraphs or multiple sentences
 
 BROCHURE STRATEGY:
-- after answering about the query of user regading layouts,sizes,floor plans,unit details,specifications from the context , then ask user if he/she wants brochure as a follow-up question.
+- ACTIVELY offer brochure when user shows interest in details, layout, floor plans, specifications, amenities
 - Use phrases like "Would you like me to send you our detailed brochure?" 
 - The brochure contains complete information about Brookstone's luxury offerings
 - Make brochure sound valuable and comprehensive
-- Offer brochure as a follow-up question for queries about layouts, floor plans, unit details, specifications after giving answers from context
+- Offer brochure for queries about layouts, floor plans, unit details, specifications
 
 SPECIAL HANDLING:
 
@@ -1015,6 +1079,19 @@ Assistant:
 
         response = gemini_chat.invoke(system_prompt).content.strip()
         logging.info(f"🧠 LLM Response: {response}")
+
+        # Apply area terminology replacement in the response if needed
+        if area_response_mapping:
+            if area_response_mapping["user_term"] == "carpet area":
+                # User asked about carpet area, replace any mention of "carpet area" with "Super Build-up area"
+                response = re.sub(r'\bcarpet\s+area\b', area_response_mapping["response_term"], response, flags=re.IGNORECASE)
+                response = re.sub(r'\bcarpet\b(?!\s+area)', area_response_mapping["response_term"], response, flags=re.IGNORECASE)
+                logging.info(f"🏠 Replaced carpet area mentions with {area_response_mapping['response_term']}")
+            else:
+                # User asked about super build-up/build-up/SBU, make sure we don't mention carpet area
+                response = re.sub(r'\bcarpet\s+area\b', area_response_mapping["response_term"], response, flags=re.IGNORECASE)
+                response = re.sub(r'\bcarpet\b(?!\s+area)', area_response_mapping["response_term"], response, flags=re.IGNORECASE)
+                logging.info(f"🏠 Ensured response uses {area_response_mapping['response_term']} instead of carpet area")
 
         # Translate response to Gujarati if user language is Gujarati
         final_response = response
@@ -1110,7 +1187,7 @@ def webhook():
         for entry in data.get("entry", []):
             for change in entry.get("changes", []):
                 value = change.get("value", {})
-                messages = value.get("messages", []) 
+                messages = value.get("messages", [])
 
                 for message in messages:
                     from_phone = message.get("from")
@@ -1146,9 +1223,9 @@ def health():
         "status": "healthy",
         "whatsapp_configured": bool(WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID),
         "gemini_configured": bool(GEMINI_API_KEY and gemini_model and gemini_chat),
-        "pinecone_configured": bool(PINECONE_API_KEY and pc),
+        "pinecone_configured": bool(PINECONE_API_KEY and openai_embeddings),
         "workveu_configured": bool(WORKVEU_WEBHOOK_URL and WORKVEU_API_KEY),
-        "hybrid_mode": "Gemini for chat, Ollama for search"
+        "hybrid_mode": "Gemini for chat, OpenAI for search"
     }), 200
 
 @app.route("/", methods=["GET"])
