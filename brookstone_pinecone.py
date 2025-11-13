@@ -10,7 +10,7 @@ import json
 from datetime import datetime, timedelta
 import google.generativeai as genai
 from langchain_community.embeddings import OllamaEmbeddings
-import pinecone
+from pinecone import Pinecone, ServerlessSpec
 
 load_dotenv()
 
@@ -147,7 +147,7 @@ except Exception as e:
 
 
 # ================================================
-# OLLAMA + PINECONE RETRIEVAL SETUP
+# OLLAMA + PINECONE RETRIEVAL SETUP (latest SDK)
 # ================================================
 INDEX_NAME = "brookstone-faq"
 
@@ -158,32 +158,47 @@ except Exception as e:
     logging.error(f"❌ Error initializing Ollama embeddings: {e}")
     ollama_embeddings = None
 
+# Create new Pinecone client (latest SDK)
+pc = None
 try:
-    pinecone.init(api_key=PINECONE_API_KEY, environment="us-east-1-aws")
-    logging.info("✅ Connected to Pinecone (us-east-1-aws)")
+    pc = Pinecone(api_key=PINECONE_API_KEY)
+    logging.info("✅ Pinecone client created successfully")
 except Exception as e:
-    logging.error(f"❌ Failed to connect to Pinecone: {e}")
+    logging.error(f"❌ Failed to create Pinecone client: {e}")
+    pc = None
+
 
 def load_vectorstore():
+    """Connect to existing Pinecone index using new client."""
     if not ollama_embeddings:
         logging.error("❌ Ollama embeddings not available for Pinecone retrieval")
         return None
+    if not pc:
+        logging.error("❌ Pinecone client not initialized")
+        return None
+
     try:
-        vectorstore = PineconeVectorStore(
-            index_name=INDEX_NAME,
-            embedding=ollama_embeddings,
-        )
-        logging.info(f"✅ Loaded Pinecone index '{INDEX_NAME}' with Ollama embeddings")
+        # Ensure index exists
+        indexes = [idx["name"] for idx in pc.list_indexes()]
+        if INDEX_NAME not in indexes:
+            logging.error(f"❌ Index '{INDEX_NAME}' not found in Pinecone. Available: {indexes}")
+            return None
+
+        # Connect to the existing index
+        index = pc.Index(INDEX_NAME)
+        vectorstore = PineconeVectorStore(index=index, embedding=ollama_embeddings)
+        logging.info(f"✅ Connected to Pinecone index '{INDEX_NAME}' with Ollama embeddings")
         return vectorstore
     except Exception as e:
-        logging.error(f"❌ Error loading Pinecone vectorstore: {e}")
+        logging.error(f"❌ Error connecting to Pinecone index: {e}")
         return None
+
 
 try:
     vectorstore = load_vectorstore()
     if vectorstore:
         retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-        logging.info("✅ Retriever initialized successfully using Ollama embeddings")
+        logging.info("✅ Retriever initialized successfully using Ollama embeddings + Pinecone")
     else:
         retriever = None
         logging.error("❌ Failed to load retriever from Pinecone")
@@ -193,7 +208,7 @@ except Exception as e:
 
 
 # ================================================
-# TRANSLATION FUNCTIONS (unchanged)
+# TRANSLATION FUNCTIONS
 # ================================================
 def translate_gujarati_to_english(text):
     try:
@@ -220,15 +235,8 @@ def translate_english_to_gujarati(text):
 
 
 # ================================================
-# REST OF YOUR CODE (unchanged)
+# HEALTH CHECK ROUTE
 # ================================================
-# -- Conversation state, WhatsApp message handling,
-# -- WorkVEU integration, message processing,
-# -- and webhook routes remain identical.
-
-# (Keep all your existing process_incoming_message, webhook, and health routes here)
-# ================================================
-
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
@@ -241,6 +249,9 @@ def health():
     }), 200
 
 
+# ================================================
+# RUN APP
+# ================================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     logging.info(f"🚀 Starting Brookstone WhatsApp Bot on port {port}")
