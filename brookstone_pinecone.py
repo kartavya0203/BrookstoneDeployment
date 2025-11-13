@@ -982,6 +982,11 @@ CORE INSTRUCTIONS:
 - Be NATURAL and CONTEXTUAL - don't repeat the same phrases in every response
 - Only mention flat types (3&4BHK) when user specifically asks about them
 
+CRITICAL AREA TERMINOLOGY RULE:
+- NEVER use the term "carpet area" in any response
+- ALWAYS use "Super Build-up area" or "SBU" when referring to area measurements
+- When talking about flat sizes, always say "Super Build-up area" not "carpet area"
+
 MEMORY CONTEXT: {follow_up_memory}{conversation_context}{preferences_context}
 
 SMART FLAT MENTIONS:
@@ -1079,18 +1084,25 @@ Assistant:
         response = gemini_chat.invoke(system_prompt).content.strip()
         logging.info(f"🧠 LLM Response: {response}")
 
-        # Apply area terminology replacement in the response if needed
+        # GLOBAL RULE: Always replace "carpet area" with "Super Build-up area" in ALL responses
+        # This ensures "carpet area" never appears in any bot response
+        original_response = response
+        response = re.sub(r'\bcarpet\s+area\b', 'Super Build-up area', response, flags=re.IGNORECASE)
+        response = re.sub(r'\bcarpet\b(?!\s+area)', 'Super Build-up area', response, flags=re.IGNORECASE)
+        
+        if original_response != response:
+            logging.info(f"🏠 GLOBAL: Replaced all 'carpet area' mentions with 'Super Build-up area'")
+
+        # Apply specific area terminology replacement if needed
         if area_response_mapping:
             if area_response_mapping["user_term"] == "carpet area":
-                # User asked about carpet area, replace any mention of "carpet area" with "Super Build-up area"
-                response = re.sub(r'\bcarpet\s+area\b', area_response_mapping["response_term"], response, flags=re.IGNORECASE)
-                response = re.sub(r'\bcarpet\b(?!\s+area)', area_response_mapping["response_term"], response, flags=re.IGNORECASE)
-                logging.info(f"🏠 Replaced carpet area mentions with {area_response_mapping['response_term']}")
+                # User asked about carpet area, use their mapped response term
+                response = re.sub(r'\bSuper Build-up area\b', area_response_mapping["response_term"], response, flags=re.IGNORECASE)
+                logging.info(f"🏠 Applied specific terminology: {area_response_mapping['response_term']}")
             else:
-                # User asked about super build-up/build-up/SBU, make sure we don't mention carpet area
-                response = re.sub(r'\bcarpet\s+area\b', area_response_mapping["response_term"], response, flags=re.IGNORECASE)
-                response = re.sub(r'\bcarpet\b(?!\s+area)', area_response_mapping["response_term"], response, flags=re.IGNORECASE)
-                logging.info(f"🏠 Ensured response uses {area_response_mapping['response_term']} instead of carpet area")
+                # User asked about super build-up/build-up/SBU, use their exact term
+                response = re.sub(r'\bSuper Build-up area\b', area_response_mapping["response_term"], response, flags=re.IGNORECASE)
+                logging.info(f"🏠 Applied specific terminology: {area_response_mapping['response_term']}")
 
         # Translate response to Gujarati if user language is Gujarati
         final_response = response
