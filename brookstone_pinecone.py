@@ -6,6 +6,7 @@ import requests
 from dotenv import load_dotenv
 from langchain_pinecone import PineconeVectorStore
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+# Removed: from langchain_community.embeddings import OpenAIEmbeddings
 import json
 from datetime import datetime, timedelta
 import google.generativeai as genai
@@ -22,6 +23,7 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "brookstone_verify_token_2024")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# OPENAI_API_KEY no longer needed for embeddings
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 BROCHURE_URL = os.getenv("BROCHURE_URL", "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/BROOKSTONE.pdf")
 
@@ -125,34 +127,34 @@ def ensure_media_up_to_date():
 # Initialize media state at startup (without scheduler)
 try:
     ensure_media_up_to_date()
-    logging.info(f"� Media management initialized. Use refresh_media.py for 29-day renewals.")
+    logging.info(f"📱 Media management initialized. Use refresh_media.py for 29-day renewals.")
 except Exception as e:
     logging.error(f"❌ Error initializing media: {e}")
 
 if not GEMINI_API_KEY or not PINECONE_API_KEY:
     logging.error("❌ Missing API keys! Need GEMINI_API_KEY and PINECONE_API_KEY")
 
-# Initialize Gemini for chat, translations, and Pinecone embeddings
+# Initialize Gemini for chat, translations, AND embeddings
 gemini_model = None
 gemini_chat = None
 gemini_embeddings = None
 
 if not GEMINI_API_KEY:
-    logging.error("❌ Missing Gemini API key! Chat, translation, and search features will not work.")
+    logging.error("❌ Missing Gemini API key! Chat, translation, and embedding features will not work.")
 else:
     try:
         # Configure Gemini
         genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+        gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
         
         # Initialize Gemini chat for LangChain
         gemini_chat = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash-exp",
             google_api_key=GEMINI_API_KEY,
             temperature=0
         )
         
-        # Initialize Gemini embeddings for Pinecone (768 dimensions)
+        # Initialize Gemini embeddings for Pinecone
         gemini_embeddings = GoogleGenerativeAIEmbeddings(
             model="models/text-embedding-004",
             google_api_key=GEMINI_API_KEY
@@ -168,7 +170,7 @@ else:
 # ================================================
 # PINECONE SETUP
 # ================================================
-INDEX_NAME = "brookstone-faq"
+INDEX_NAME = "brookstone-faq"  # Updated to new index name
 
 def load_vectorstore():
     if not gemini_embeddings:
@@ -445,31 +447,6 @@ Return only a comma-separated list of relevant categories. Example: "pricing, si
         logging.error(f"❌ Error in Gemini interest analysis: {e}")
         return analyze_user_interests(message_text, state)  # Fallback
 
-def analyze_user_interests(message_text, state):
-    """Analyze user message to understand their interests"""
-    message_lower = message_text.lower()
-    interests = []
-    
-    # Interest categories - these help understand user intent
-    interest_keywords = {
-        "pricing": ["price", "cost", "budget", "expensive", "cheap", "affordable", "rate"],
-        "size": ["size", "area", "bhk", "bedroom", "space", "sqft", "square"],
-        "amenities": ["amenities", "facilities", "gym", "pool", "parking", "security"],
-        "location": ["location", "address", "nearby", "connectivity", "metro", "airport"],
-        "availability": ["available", "ready", "possession", "when", "booking"],
-        "visit": ["visit", "see", "tour", "show", "check", "viewing"]
-    }
-    
-    for category, keywords in interest_keywords.items():
-        if any(keyword in message_lower for keyword in keywords):
-            interests.append(category)
-    
-    # Update user interests (keep last 5 to avoid memory bloat)
-    state["user_interests"].extend(interests)
-    state["user_interests"] = list(set(state["user_interests"][-5:]))
-    
-    return interests
-
 # ================================================
 # WHATSAPP FUNCTIONS
 # ================================================
@@ -638,7 +615,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         return
 
     # 📄 PRIORITY: Check for direct brochure requests (Enhanced Gujarati Support)
-    brochure_keywords = ["brochure", "pdf", "document", "file", "download", "ब्रोशर", "બ્રોશર"]
+    brochure_keywords = ["brochure", "pdf", "document", "file", "download", "send", "details", "ब्रोशर", "બ્રોશર"]
     gujarati_action_words = ["મોકલો", "આપો", "મોકલાવો", "મોકલ", "આપ", "જોઈએ", "પાઠવો", "મેળવવા", "લેવા"]
     
     # Check for Gujarati brochure requests specifically
@@ -655,9 +632,9 @@ def process_incoming_message(from_phone, message_text, message_id):
         push_to_workveu(name="Brookstone Bot", wa_id=from_phone, message_text=f"📄 Brochure sent + {brochure_sent_text}", direction="outbound")
         return
     
-    # Check for English brochure requests (more specific)
+    # Check for English brochure requests
     if any(keyword in message_text.lower() for keyword in brochure_keywords):
-        if any(word in message_text.lower() for word in ["send brochure", "send pdf", "share brochure", "give brochure", "want brochure", "need brochure", "show brochure", "send document", "send file"] + gujarati_action_words):
+        if any(word in message_text.lower() for word in ["send", "share", "give", "want", "need", "show"] + gujarati_action_words):
             logging.info(f"📄 Direct brochure request detected from {from_phone}")
             send_whatsapp_document(from_phone)
             brochure_sent_text = "📄 Here's your Brookstone brochure with complete details! ✨ Any questions after reviewing it? 🏠😊"
@@ -752,16 +729,11 @@ def process_incoming_message(from_phone, message_text, message_id):
         return
 
     try:
-        # Use original query for Pinecone search since we're using Gemini embeddings
-        # Gemini embeddings can handle multilingual queries directly
+        # Translate Gujarati query to English for Pinecone search
         search_query = message_text
-        
-        # Optional: Still translate Gujarati to English for better semantic understanding
-        # but use original query for embedding search
-        translated_query = message_text
         if state["language"] == "gujarati":
-            translated_query = translate_gujarati_to_english(message_text)
-            logging.info(f"🔄 Translated query for context: {translated_query}")
+            search_query = translate_gujarati_to_english(message_text)
+            logging.info(f"🔄 Translated query: {search_query}")
 
         docs = retriever.invoke(search_query)
         logging.info(f"📚 Retrieved {len(docs)} relevant documents")
@@ -813,24 +785,18 @@ You are a friendly real estate assistant for Brookstone project. Be conversation
 {language_instruction}
 
 CORE INSTRUCTIONS:
-- ANSWER user questions using the knowledge context provided below
 - Be EXTREMELY CONCISE - Maximum 1-2 sentences for initial response
+- Answer using context below when available
 - Use 2-3 relevant emojis only
 - Keep responses WhatsApp-friendly and brief
-- Do NOT invent details - only use information from the provided context
+- Do NOT invent details
+- Do NOT give long explanations unless specifically asked
 - ALWAYS try to convince user in a friendly way
 - Use the conversation memory and user preferences provided
 - Be NATURAL and CONTEXTUAL - don't repeat the same phrases in every response
 - Only mention flat types (3&4BHK) when user specifically asks about them
 
 MEMORY CONTEXT: {follow_up_memory}{conversation_context}{preferences_context}
-
-ANSWER STRATEGY:
-- FIRST: Look for the answer in the provided knowledge context below
-- If context has the information, answer directly and confidently
-- If context doesn't have specific details, then offer to contact agents or send brochure
-- For specific technical questions (built-up area,kitchen size, etc.), use the context to provide exact answers
-- Do NOT immediately offer brochure if you can answer from the context
 
 SMART FLAT MENTIONS:
 - ONLY mention "Brookstone offers luxurious 3&4BHK flats" when user specifically asks about:
@@ -843,38 +809,31 @@ SMART FLAT MENTIONS:
 - For queries about amenities, location, pricing, etc. - just answer directly without mentioning flat types
 
 RESPONSE LENGTH RULES:
-- For specific factual questions: Provide the exact answer from context + brief follow-up
+- For flat availability questions: "Yes! We have luxury 3&4BHK flats available 🏠 Interested in details? ✨"
 - For general questions: Keep to 1 short sentence + 1 follow-up question
 - NO detailed explanations unless specifically asked for details
 - NO long paragraphs or multiple sentences
 
 BROCHURE STRATEGY:
-- Only offer brochure when context doesn't have enough information to answer the question
-- Use phrases like "Would you like our detailed brochure for more specifications?" 
-- Do NOT offer brochure if you can answer the question from the provided context
+- ACTIVELY offer brochure when user shows interest in details, layout, floor plans, specifications, amenities
+- Use phrases like "Would you like me to send you our detailed brochure?" 
+- The brochure contains complete information about Brookstone's luxury offerings
+- Make brochure sound valuable and comprehensive
+- Offer brochure for queries about layouts, floor plans, unit details, specifications
 
 SPECIAL HANDLING:
 
-1. TIMINGS: "Our site office is open from *10:30 AM to 7:00 PM* every day. �"
+1. TIMINGS: "Our site office is open from *10:30 AM to 7:00 PM* every day. 🕒"
 
-1. SPECIFIC TECHNICAL QUESTIONS: If user asks about built-up area, carpet area, kitchen size, room dimensions, etc. - provide exact details from the knowledge context below
+2. SITE VISIT BOOKING: "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit. 📞✨"
 
-2. TIMINGS: "Our site office is open from *10:30 AM to 7:00 PM* every day. ⏰"
+3. GENERAL QUERIES: "You can contact our agents at 8238477697 or 9974812701 for any queries. 📱😊"
 
-3. SITE VISIT BOOKING: "Perfect! Please contact *Mr. Nilesh at 7600612701* to book your site visit. 📞✨"
+4. PRICING: Check context first. If no pricing info: "For latest pricing details, please contact our agents at 8238477697 or 9974812701. 💰📞"
 
-4. GENERAL QUERIES: Only when context doesn't have the answer: "You can contact our agents at 8238477697 or 9974812701 for any queries. 📱😊"
-
-5. PRICING: Check context first. If no pricing info: "For latest pricing details, please contact our agents at 8238477697 or 9974812701. 💰📞"
-
-6. BROCHURE OFFERING: Only when context lacks sufficient detail: "Would you like our detailed brochure for complete specifications? 📄✨"
+5. BROCHURE OFFERING: When user asks about details/layout/plans/amenities/specifications: "Would you like me to send you our detailed brochure with all floor plans and specifications? 📄✨"
 
 IMPORTANT: Do NOT handle location/address requests here - they are processed separately and will send location pin automatically.
-
-PRIORITY ORDER:
-1. Answer from the provided knowledge context (FIRST PRIORITY)
-2. If context doesn't have the info, then offer agent contact or brochure
-3. Always be helpful and convincing
 
 CONVINCING STRATEGY:
 - Use positive, enthusiastic language
@@ -903,21 +862,17 @@ CONVERSATION FLOW:
 
 Example Responses (be contextual, not repetitive):
 - When user asks about flat types: "Yes! We have luxury 3&4BHK flats 🏠 Which interests you more? ✨"
-- When user asks about built-up area: "[Answer from context with exact area] 🏠 Need carpet area too? ✨"
-- When user asks about kitchen size: "[Answer from context with kitchen dimensions] 🍳 Want to see the layout? ✨"
-- When user asks about amenities: "[List key amenities from context] 💎 Interested in visiting? 📞"
+- When user asks about amenities: "Amazing amenities available! 💎 Want the brochure? 📄"
 - When user asks about location: "Great location with excellent connectivity! 🗺️ Want to visit? 📞"
 - When user asks about pricing: "Please contact 8238477697 for pricing 📞 Interested in floor plans? 📄"
 
 Remember: Keep responses EXTREMELY brief - maximum 1-2 sentences!
 
-CRITICAL: Always check the knowledge context first and provide specific answers when available!
-
 ---
 Available Knowledge Context:
 {context}
 
-User Question: {translated_query if state["language"] == "gujarati" else search_query}
+User Question: {search_query}
 
 IMPORTANT: Be natural and contextual. Don't force "Brookstone offers luxurious 3&4BHK flats" into every response. Only mention flat types when the user specifically asks about configurations, availability, or what types of units you have.
 
@@ -1069,10 +1024,9 @@ def health():
         "status": "healthy",
         "whatsapp_configured": bool(WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID),
         "gemini_configured": bool(GEMINI_API_KEY and gemini_model and gemini_chat),
-        "gemini_embeddings_configured": bool(gemini_embeddings),
         "pinecone_configured": bool(PINECONE_API_KEY and gemini_embeddings),
         "workveu_configured": bool(WORKVEU_WEBHOOK_URL and WORKVEU_API_KEY),
-        "mode": "Full Gemini integration with Gemini embeddings for Pinecone"
+        "embeddings_model": "Gemini text-embedding-004"
     }), 200
 
 @app.route("/", methods=["GET"])
