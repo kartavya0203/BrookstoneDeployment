@@ -274,25 +274,34 @@ def load_vectorstore():
         # check available indexes
         try:
             indexes_info = pc.list_indexes()
-            indexes = [idx["name"] if isinstance(idx, dict) and "name" in idx else idx for idx in indexes_info]
-        except Exception:
-            # Some SDK versions return flat list of names
-            try:
-                indexes = pc.list_indexes()
-            except Exception as e:
-                logging.warning(f"⚠️ Could not list indexes: {e}")
-                indexes = []
+            # Extract index names properly from the response
+            if hasattr(indexes_info, 'indexes'):
+                # New SDK format: indexes_info.indexes is a list of index objects
+                indexes = [idx.name for idx in indexes_info.indexes]
+            elif isinstance(indexes_info, list) and len(indexes_info) > 0:
+                # List of dicts or objects
+                if isinstance(indexes_info[0], dict):
+                    indexes = [idx.get("name", str(idx)) for idx in indexes_info if isinstance(idx, dict)]
+                else:
+                    indexes = [getattr(idx, 'name', str(idx)) for idx in indexes_info]
+            else:
+                # Fallback
+                indexes = [str(idx) for idx in indexes_info]
+            logging.info(f"📋 Available Pinecone indexes: {indexes}")
+        except Exception as e:
+            logging.warning(f"⚠️ Could not list indexes: {e}")
+            indexes = []
 
         if INDEX_NAME not in indexes:
-            logging.error(f"❌ Index '{INDEX_NAME}' not found in Pinecone. Available: {indexes}")
-            # still attempt to create a client Index handle; this may still work depending on SDK
-            try:
-                index_handle = pc.Index(INDEX_NAME)
-            except Exception as e:
-                logging.error(f"❌ Could not create index handle: {e}")
-                return None
-        else:
+            logging.warning(f"⚠️ Index '{INDEX_NAME}' not in listed indexes {indexes}, but attempting connection anyway...")
+        
+        # Always attempt to create index handle regardless of listing result
+        try:
             index_handle = pc.Index(INDEX_NAME)
+            logging.info(f"✅ Successfully created index handle for '{INDEX_NAME}'")
+        except Exception as e:
+            logging.error(f"❌ Could not create index handle for '{INDEX_NAME}': {e}")
+            return None
 
         # Try to create LangChain-compatible PineconeVectorStore
         try:
