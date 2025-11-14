@@ -192,28 +192,68 @@ class RetrieverWrapper:
         Unified invoke method that works with different retriever types.
         Tries methods in order of most to least common.
         """
-        # Method 1: Try invoke() - LangChain's newer standard
-        if hasattr(self.inner, 'invoke') and callable(getattr(self.inner, 'invoke')):
-            try:
-                return self.inner.invoke(query)
-            except Exception as e:
-                logging.debug(f"invoke() method failed: {e}")
-        
-        # Method 2: Try get_relevant_documents() - LangChain's classic retriever method
+        import inspect
+
+        # Prefer get_relevant_documents (classic retriever method)
+        try_patterns = []
+
         if hasattr(self.inner, 'get_relevant_documents') and callable(getattr(self.inner, 'get_relevant_documents')):
-            try:
-                return self.inner.get_relevant_documents(query)
-            except Exception as e:
-                logging.debug(f"get_relevant_documents() method failed: {e}")
-        
-        # Method 3: Try similarity_search() - Direct vectorstore method
+            try_patterns.append(('get_relevant_documents', lambda q: self.inner.get_relevant_documents(q)))
+            # try keyword as well
+            try_patterns.append(('get_relevant_documents_kw', lambda q: self.inner.get_relevant_documents(query=q)))
+
+        # similarity_search (vectorstore direct method)
         if hasattr(self.inner, 'similarity_search') and callable(getattr(self.inner, 'similarity_search')):
+            try_patterns.append(('similarity_search_k', lambda q: self.inner.similarity_search(q, k=5)))
+            try_patterns.append(('similarity_search_kwargs', lambda q: self.inner.similarity_search(q, k=5, **{})))
+
+        # async_search (some retrievers expose async search) - try sync call if available
+        if hasattr(self.inner, 'async_search') and callable(getattr(self.inner, 'async_search')):
+            try_patterns.append(('async_search', lambda q: self.inner.async_search(q)))
+
+        # As a fallback, try invoke() but be flexible with argument styles
+        if hasattr(self.inner, 'invoke') and callable(getattr(self.inner, 'invoke')):
+            try_patterns.append(('invoke_pos', lambda q: self.inner.invoke(q)))
+            try_patterns.append(('invoke_dict', lambda q: self.inner.invoke({'input': q})))
+            try_patterns.append(('invoke_kwargs', lambda q: self.inner.invoke(input=q)))
+
+        # Try the patterns until one works
+        for name, fn in try_patterns:
             try:
-                return self.inner.similarity_search(query, k=5)
+                result = fn(query)
+                # Some implementations return an awaitable or a generator/stream - handle common cases
+                # If it's an iterator/generator, convert to list
+                if hasattr(result, '__aiter__') or inspect.isgenerator(result):
+                    result = list(result)
+
+                # If result is a pydantic model or wrapper with .results / .documents, try to extract
+                if result is None:
+                    logging.debug(f"Retriever pattern {name} returned None")
+                    continue
+
+                # If returned object has attribute 'documents' or 'results', prefer that
+                if hasattr(result, 'documents'):
+                    docs = getattr(result, 'documents')
+                    logging.info(f"✅ Retriever pattern '{name}' succeeded (extracted .documents)")
+                    return docs
+                if hasattr(result, 'results'):
+                    docs = getattr(result, 'results')
+                    logging.info(f"✅ Retriever pattern '{name}' succeeded (extracted .results)")
+                    return docs
+
+                # If result is already a list (of docs), return it
+                if isinstance(result, list):
+                    logging.info(f"✅ Retriever pattern '{name}' succeeded (returned list)")
+                    return result
+
+                # If it's a single Document-like object, wrap in list
+                logging.info(f"✅ Retriever pattern '{name}' returned single object, wrapping into list")
+                return [result]
+
             except Exception as e:
-                logging.debug(f"similarity_search() method failed: {e}")
-        
-        # If all methods fail, log error and return empty list
+                logging.debug(f"Retriever pattern {name} failed: {e}")
+
+        # If all methods fail, log error and return empty list with available methods
         logging.error(f"❌ Retriever invocation failed: No compatible method found on {type(self.inner).__name__}")
         logging.error(f"Available methods: {[m for m in dir(self.inner) if not m.startswith('_')]}")
         return []
