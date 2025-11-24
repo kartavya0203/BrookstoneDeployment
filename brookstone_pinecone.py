@@ -976,12 +976,10 @@ RESPONSE LENGTH RULES:
 - NO long paragraphs or multiple sentences
 
 BROCHURE STRATEGY:
-- INTELLIGENTLY detect when user wants brochure/documents/detailed information without relying on keywords
-- Look for intent patterns like: wanting details, floor plans, specifications, complete information, downloadable content
-- if user asks about : "I want 4bhk details", "tell me about your flats", "I need more information", "show me plans" , then offer brochure as a follow-up after providing answer from context.
-- In Gujarati: "વિગતો જોઈએ", "માહિતી મોકલો", "ડીટેલ્સ આપો" etc. , then offer brochure as a follow-up after providing answer from context.
-- When you detect brochure intent, say: "I'll send you our detailed brochure with complete information!"
-- Make brochure sound valuable: "complete floor plans", "all specifications", "detailed layouts"
+- offer brochure as a follow-up when user shows interest in details, layout, floor plans, specifications, amenities after answering from retrieved context
+- Use phrases like "Would you like me to send you our detailed brochure?" 
+- The brochure contains complete information about Brookstone's luxury offerings
+- Make brochure sound valuable and comprehensive
 
 SPECIAL HANDLING:
 
@@ -1125,10 +1123,10 @@ Assistant:
             # Bot already provided agent contact info, no state change needed
             logging.info(f"📞 Agent contact info provided to {from_phone}")
 
-        # AI-driven intent detection for immediate actions
+        # Legacy intent detection for immediate actions (without confirmation) 
         # Note: Location requests are now handled separately by Gemini detection
-        if re.search(r"\bi'll send you.*brochure\b|\bsending.*brochure\b|\bhere.*brochure.*complete\b", response_lower) and state.get("waiting_for") != "brochure_confirmation":
-            logging.info(f"📄 AI detected brochure intent for {from_phone}")
+        if re.search(r"\bhere.*brochure\b|\bsending.*brochure\b", response_lower) and state.get("waiting_for") != "brochure_confirmation":
+            logging.info(f"📄 Legacy brochure trigger for {from_phone}")
             send_whatsapp_document(from_phone)
 
         state["chat_history"].append({"role": "assistant", "content": final_response})

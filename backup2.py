@@ -177,7 +177,7 @@ else:
 # ================================================
 # PINECONE SETUP
 # ================================================
-INDEX_NAME = "brookstone-index"
+INDEX_NAME = "brookstone-faq-json"
 
 def load_vectorstore():
     if not openai_embeddings:
@@ -254,6 +254,76 @@ Gujarati translation (keep it brief and concise):
     except Exception as e:
         logging.error(f"❌ Error translating English to Gujarati with Gemini: {e}")
         return text  # Return original text if translation fails
+
+# ================================================
+# AREA INFORMATION DATABASE
+# ================================================
+AREA_INFO = {
+    "3bhk": {
+        "super_buildup": "2650 sqft",
+        "display_name": "3BHK"
+    },
+    "4bhk": {
+        "super_buildup": "3850 sqft", 
+        "display_name": "4BHK"
+    },
+    "3bhk_tower_duplex": {
+        "super_buildup": "5300 sqft + 700 sqft carpet terrace",
+        "display_name": "3BHK Tower Duplex"
+    },
+    "4bhk_tower_duplex": {
+        "super_buildup": "7700 sqft + 1000 sqft carpet terrace",
+        "display_name": "4BHK Tower Duplex" 
+    },
+    "3bhk_tower_simplex": {
+        "super_buildup": "2650 sqft + 700 sqft carpet terrace",
+        "display_name": "3BHK Tower Simplex"
+    },
+    "4bhk_tower_simplex": {
+        "super_buildup": "3850 sqft + 1000 sqft carpet terrace", 
+        "display_name": "4BHK Tower Simplex"
+    }
+}
+
+def get_area_information(query):
+    """Get area information from hardcoded database"""
+    query_lower = query.lower()
+    results = []
+    
+    # Check for specific unit types
+    if "tower duplex" in query_lower:
+        if "3bhk" in query_lower or "3 bhk" in query_lower:
+            results.append(f"{AREA_INFO['3bhk_tower_duplex']['display_name']}: {AREA_INFO['3bhk_tower_duplex']['super_buildup']}")
+        elif "4bhk" in query_lower or "4 bhk" in query_lower:
+            results.append(f"{AREA_INFO['4bhk_tower_duplex']['display_name']}: {AREA_INFO['4bhk_tower_duplex']['super_buildup']}")
+        else:
+            # If tower duplex mentioned but no specific BHK, show both tower duplex units
+            results.append(f"{AREA_INFO['3bhk_tower_duplex']['display_name']}: {AREA_INFO['3bhk_tower_duplex']['super_buildup']}")
+            results.append(f"{AREA_INFO['4bhk_tower_duplex']['display_name']}: {AREA_INFO['4bhk_tower_duplex']['super_buildup']}")
+    elif "tower simplex" in query_lower:
+        if "3bhk" in query_lower or "3 bhk" in query_lower:
+            results.append(f"{AREA_INFO['3bhk_tower_simplex']['display_name']}: {AREA_INFO['3bhk_tower_simplex']['super_buildup']}")
+        elif "4bhk" in query_lower or "4 bhk" in query_lower:
+            results.append(f"{AREA_INFO['4bhk_tower_simplex']['display_name']}: {AREA_INFO['4bhk_tower_simplex']['super_buildup']}")
+        else:
+            # If tower simplex mentioned but no specific BHK, show both tower simplex units
+            results.append(f"{AREA_INFO['3bhk_tower_simplex']['display_name']}: {AREA_INFO['3bhk_tower_simplex']['super_buildup']}")
+            results.append(f"{AREA_INFO['4bhk_tower_simplex']['display_name']}: {AREA_INFO['4bhk_tower_simplex']['super_buildup']}")
+    else:
+        # Regular units - only add specific matches
+        if "3bhk" in query_lower or "3 bhk" in query_lower:
+            results.append(f"{AREA_INFO['3bhk']['display_name']}: {AREA_INFO['3bhk']['super_buildup']}")
+        if "4bhk" in query_lower or "4 bhk" in query_lower:
+            results.append(f"{AREA_INFO['4bhk']['display_name']}: {AREA_INFO['4bhk']['super_buildup']}")
+        
+        # Only return all regular units if query is very general (like "what are the sizes" or "area information")
+        if not results and any(general_term in query_lower for general_term in ["what are", "all", "available", "sizes", "options"]) and not any(specific in query_lower for specific in ["5bhk", "penthouse", "villa", "studio"]):
+            results = [
+                f"{AREA_INFO['3bhk']['display_name']}: {AREA_INFO['3bhk']['super_buildup']}",
+                f"{AREA_INFO['4bhk']['display_name']}: {AREA_INFO['4bhk']['super_buildup']}"
+            ]
+    
+    return results
 
 # ================================================
 # CONVERSATION STATE & CONTEXT ANALYSIS WITH GEMINI
@@ -646,37 +716,7 @@ def process_incoming_message(from_phone, message_text, message_id):
         send_whatsapp_location(from_phone)
         return
 
-    # 📄 PRIORITY: Check for direct brochure requests (Enhanced Gujarati Support)
-    brochure_keywords = ["brochure", "pdf", "document", "file", "download", "send", "details", "ब्रोशर", "બ્રોશર"]
-    gujarati_action_words = ["મોકલો", "આપો", "મોકલાવો", "મોકલ", "આપ", "જોઈએ", "પાઠવો", "મેળવવા", "લેવા"]
-    
-    # Check for Gujarati brochure requests specifically
-    if "બ્રોશર" in message_text:
-        # If user mentions "બ્રોશર" in any context, send the brochure immediately
-        logging.info(f"📄 Gujarati brochure request detected from {from_phone} - 'બ્રોશર' found")
-        send_whatsapp_document(from_phone)
-        brochure_sent_text = "📄 Here's your Brookstone brochure with complete details! ✨ Any questions after reviewing it? 🏠😊"
-        if state["language"] == "gujarati":
-            brochure_sent_text = translate_english_to_gujarati(brochure_sent_text)
-        send_whatsapp_text(from_phone, brochure_sent_text)
-        
-        # >>> Added for WorkVEU CRM Integration <<<
-        push_to_workveu(name="Brookstone Bot", wa_id=from_phone, message_text=f"📄 Brochure sent + {brochure_sent_text}", direction="outbound")
-        return
-    
-    # Check for English brochure requests
-    if any(keyword in message_text.lower() for keyword in brochure_keywords):
-        if any(word in message_text.lower() for word in ["send", "share", "give", "want", "need", "show"] + gujarati_action_words):
-            logging.info(f"📄 Direct brochure request detected from {from_phone}")
-            send_whatsapp_document(from_phone)
-            brochure_sent_text = "📄 Here's your Brookstone brochure with complete details! ✨ Any questions after reviewing it? 🏠😊"
-            if state["language"] == "gujarati":
-                brochure_sent_text = translate_english_to_gujarati(brochure_sent_text)
-            send_whatsapp_text(from_phone, brochure_sent_text)
-            
-            # >>> Added for WorkVEU CRM Integration <<<
-            push_to_workveu(name="Brookstone Bot", wa_id=from_phone, message_text=f"📄 Brochure sent + {brochure_sent_text}", direction="outbound")
-            return
+    # Let AI model handle all intent detection intelligently instead of keyword matching
 
     # Analyze user interests for better follow-up questions (using Gemini)
     current_interests = analyze_user_interests_with_gemini(message_text, state)
@@ -767,8 +807,69 @@ def process_incoming_message(from_phone, message_text, message_id):
             search_query = translate_gujarati_to_english(message_text)
             logging.info(f"🔄 Translated query: {search_query}")
 
-        docs = retriever.invoke(search_query)
-        logging.info(f"📚 Retrieved {len(docs)} relevant documents")
+        # Area terminology mapping for search and response
+        area_response_mapping = {}
+        original_query = search_query
+        
+        # Check if user is asking about area-related queries
+        search_query_lower = search_query.lower()
+        
+        # Check if this is an area-related query that we have hardcoded information for
+        area_keywords = ["area", "sqft", "square feet", "size", "carpet", "super build", "buildup", "built-up", "sbu"]
+        is_area_query = any(keyword in search_query_lower for keyword in area_keywords)
+        
+        # Check for area terminology mapping first
+        area_response_mapping = {}
+        if any(term in search_query_lower for term in ["carpet area", "carpet"]):
+            area_response_mapping["user_term"] = "carpet area"
+            area_response_mapping["response_term"] = "Super Build-up area"
+            logging.info("🏠 User asked about carpet area - will respond with Super Build-up area")
+        elif any(term in search_query_lower for term in ["super build-up", "super buildup", "build-up", "buildup", "built-up", "sbu", "super build up", "build up"]):
+            # Extract the original term user used
+            original_term = "Super Build-up area"
+            if "sbu" in search_query_lower:
+                original_term = "SBU"
+            elif "build-up" in search_query_lower or "buildup" in search_query_lower or "built-up" in search_query_lower:
+                original_term = "Build-up area"
+            elif "super build" in search_query_lower:
+                original_term = "Super Build-up area"
+            
+            area_response_mapping["user_term"] = original_term.lower()
+            area_response_mapping["response_term"] = original_term
+            logging.info(f"🏠 User asked about {original_term}")
+        
+        # Try to get hardcoded information for area queries FIRST
+        hardcoded_area_info = []
+        use_hardcoded_only = False
+        
+        if is_area_query and area_response_mapping:
+            # For area-related queries, check hardcoded information first
+            hardcoded_area_info = get_area_information(search_query)
+            if hardcoded_area_info:
+                logging.info(f"🏠 Found hardcoded area information: {hardcoded_area_info}")
+                use_hardcoded_only = True
+                # Skip Pinecone search for area queries when hardcoded info is available
+                docs = []
+                context = ""
+            else:
+                logging.info(f"🏠 No hardcoded area info found, will search Pinecone")
+        
+        # If not using hardcoded info only, proceed with Pinecone search
+        if not use_hardcoded_only:
+            # Apply search term mapping for Pinecone search
+            if area_response_mapping:
+                if area_response_mapping["user_term"] == "carpet area":
+                    # Search for carpet area in Pinecone
+                    logging.info("🏠 Searching Pinecone for carpet area but will respond with Super Build-up area")
+                else:
+                    # Replace their term with "carpet area" for Pinecone search
+                    search_query = re.sub(r'\b(super build-?up|build-?up|built-?up|sbu)(\s+area)?\b', 'carpet area', search_query, flags=re.IGNORECASE)
+                    logging.info(f"🏠 Modified search query for Pinecone: {search_query}")
+            
+            docs = retriever.invoke(search_query)
+            logging.info(f"📚 Retrieved {len(docs)} relevant documents")
+        else:
+            docs = []
 
         context = "\n\n".join(
             [(d.page_content or "") + ("\n" + "\n".join(f"{k}: {v}" for k, v in (d.metadata or {}).items())) for d in docs]
@@ -806,6 +907,25 @@ def process_incoming_message(from_phone, message_text, message_id):
         if state.get("last_follow_up"):
             follow_up_memory = f"\nRECENT FOLLOW-UP: I recently asked '{state['last_follow_up']}' and user is now responding to that question."
         
+        # Area terminology instruction based on user query
+        area_terminology_instruction = ""
+        hardcoded_area_context = ""
+        
+        # Include hardcoded area information if available and this is an area query
+        if hardcoded_area_info and use_hardcoded_only:
+            hardcoded_area_context = f"\nHARDCODED AREA INFORMATION (USE THIS): {' | '.join(hardcoded_area_info)}"
+            area_terminology_instruction += f"\nIMPORTANT: Use ONLY the hardcoded area information provided above for area-related questions. This is the most accurate and up-to-date information. Do NOT search or use any other sources for area information."
+        elif hardcoded_area_info and not use_hardcoded_only:
+            # Hardcoded info available but also using Pinecone context
+            hardcoded_area_context = f"\nHARDCODED AREA INFORMATION: {' | '.join(hardcoded_area_info)}"
+            area_terminology_instruction += f"\nIMPORTANT: Prefer the hardcoded area information when available, but you can also use context information if needed."
+        
+        if area_response_mapping:
+            if area_response_mapping["user_term"] == "carpet area":
+                area_terminology_instruction += f"\nIMPORTANT AREA TERMINOLOGY: User asked about '{area_response_mapping['user_term']}' but you must respond using '{area_response_mapping['response_term']}' instead. Say something like 'The {area_response_mapping['response_term']} is...' or 'Our {area_response_mapping['response_term']} for...' - NEVER mention 'carpet area' in your response."
+            else:
+                area_terminology_instruction += f"\nIMPORTANT AREA TERMINOLOGY: User asked about '{area_response_mapping['response_term']}'. Use their exact term '{area_response_mapping['response_term']}' in your response - do NOT mention 'carpet area'."
+        
         # Determine language for system prompt
         language_instruction = ""
         if state["language"] == "gujarati":
@@ -815,6 +935,10 @@ def process_incoming_message(from_phone, message_text, message_id):
 You are a friendly real estate assistant for Brookstone project. Be conversational, natural, and convincing.
 
 {language_instruction}
+
+{area_terminology_instruction}
+
+{hardcoded_area_context}
 
 CORE INSTRUCTIONS:
 - Be EXTREMELY CONCISE - Maximum 1-2 sentences for initial response
@@ -827,6 +951,11 @@ CORE INSTRUCTIONS:
 - Use the conversation memory and user preferences provided
 - Be NATURAL and CONTEXTUAL - don't repeat the same phrases in every response
 - Only mention flat types (3&4BHK) when user specifically asks about them
+
+CRITICAL AREA TERMINOLOGY RULE:
+- NEVER use the term "carpet area" in any response
+- ALWAYS use "Super Build-up area" or "SBU" when referring to area measurements
+- When talking about flat sizes, always say "Super Build-up area" not "carpet area"
 
 MEMORY CONTEXT: {follow_up_memory}{conversation_context}{preferences_context}
 
@@ -847,11 +976,12 @@ RESPONSE LENGTH RULES:
 - NO long paragraphs or multiple sentences
 
 BROCHURE STRATEGY:
-- ACTIVELY offer brochure when user shows interest in details, layout, floor plans, specifications, amenities
-- Use phrases like "Would you like me to send you our detailed brochure?" 
-- The brochure contains complete information about Brookstone's luxury offerings
-- Make brochure sound valuable and comprehensive
-- Offer brochure for queries about layouts, floor plans, unit details, specifications
+- INTELLIGENTLY detect when user wants brochure/documents/detailed information without relying on keywords
+- Look for intent patterns like: wanting details, floor plans, specifications, complete information, downloadable content
+- if user asks about : "I want 4bhk details", "tell me about your flats", "I need more information", "show me plans" , then offer brochure as a follow-up after providing answer from context.
+- In Gujarati: "વિગતો જોઈએ", "માહિતી મોકલો", "ડીટેલ્સ આપો" etc. , then offer brochure as a follow-up after providing answer from context.
+- When you detect brochure intent, say: "I'll send you our detailed brochure with complete information!"
+- Make brochure sound valuable: "complete floor plans", "all specifications", "detailed layouts"
 
 SPECIAL HANDLING:
 
@@ -863,7 +993,7 @@ SPECIAL HANDLING:
 
 4. PRICING: Check context first. If no pricing info: "For latest pricing details, please contact our agents at 8238477697 or 9974812701. 💰📞"
 
-5. BROCHURE OFFERING: When user asks about details/layout/plans/amenities/specifications: "Would you like me to send you our detailed brochure with all floor plans and specifications? 📄✨"
+
 
 IMPORTANT: Do NOT handle location/address requests here - they are processed separately and will send location pin automatically.
 
@@ -926,6 +1056,26 @@ Assistant:
         response = gemini_chat.invoke(system_prompt).content.strip()
         logging.info(f"🧠 LLM Response: {response}")
 
+        # GLOBAL RULE: Always replace "carpet area" with "Super Build-up area" in ALL responses
+        # This ensures "carpet area" never appears in any bot response
+        original_response = response
+        response = re.sub(r'\bcarpet\s+area\b', 'Super Build-up area', response, flags=re.IGNORECASE)
+        response = re.sub(r'\bcarpet\b(?!\s+area)', 'Super Build-up area', response, flags=re.IGNORECASE)
+        
+        if original_response != response:
+            logging.info(f"🏠 GLOBAL: Replaced all 'carpet area' mentions with 'Super Build-up area'")
+
+        # Apply specific area terminology replacement if needed
+        if area_response_mapping:
+            if area_response_mapping["user_term"] == "carpet area":
+                # User asked about carpet area, use their mapped response term
+                response = re.sub(r'\bSuper Build-up area\b', area_response_mapping["response_term"], response, flags=re.IGNORECASE)
+                logging.info(f"🏠 Applied specific terminology: {area_response_mapping['response_term']}")
+            else:
+                # User asked about super build-up/build-up/SBU, use their exact term
+                response = re.sub(r'\bSuper Build-up area\b', area_response_mapping["response_term"], response, flags=re.IGNORECASE)
+                logging.info(f"🏠 Applied specific terminology: {area_response_mapping['response_term']}")
+
         # Translate response to Gujarati if user language is Gujarati
         final_response = response
         if state["language"] == "gujarati":
@@ -975,10 +1125,10 @@ Assistant:
             # Bot already provided agent contact info, no state change needed
             logging.info(f"📞 Agent contact info provided to {from_phone}")
 
-        # Legacy intent detection for immediate actions (without confirmation) 
+        # AI-driven intent detection for immediate actions
         # Note: Location requests are now handled separately by Gemini detection
-        if re.search(r"\bhere.*brochure\b|\bsending.*brochure\b", response_lower) and state.get("waiting_for") != "brochure_confirmation":
-            logging.info(f"📄 Legacy brochure trigger for {from_phone}")
+        if re.search(r"\bi'll send you.*brochure\b|\bsending.*brochure\b|\bhere.*brochure.*complete\b", response_lower) and state.get("waiting_for") != "brochure_confirmation":
+            logging.info(f"📄 AI detected brochure intent for {from_phone}")
             send_whatsapp_document(from_phone)
 
         state["chat_history"].append({"role": "assistant", "content": final_response})
