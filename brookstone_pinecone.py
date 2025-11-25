@@ -195,7 +195,7 @@ class SimpleOpenAIEmbeddings:
     
     def embed_query(self, text):
         response = self.client.embeddings.create(
-            model="text-embedding-ada-002",
+            model="text-embedding-3-large",
             input=text
         )
         return response.data[0].embedding
